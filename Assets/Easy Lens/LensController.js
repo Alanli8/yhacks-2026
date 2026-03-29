@@ -39,6 +39,33 @@ var adventureGraph = null;
 var currentNodeId = null;
 var pendingSelection = null;
 
+/** Verbose API / network logging (Logger panel). */
+function logFetch(msg) {
+    print("[LensController.fetch] " + msg);
+}
+
+function logFetchDeviceInfo() {
+    try {
+        if (typeof global !== "undefined" && global.deviceInfoSystem) {
+            var d = global.deviceInfoSystem;
+            logFetch(
+                "deviceInfo isEditor=" +
+                    d.isEditor() +
+                    " isMobile=" +
+                    d.isMobile() +
+                    " isDesktop=" +
+                    d.isDesktop() +
+                    " isInternetAvailable=" +
+                    d.isInternetAvailable()
+            );
+        } else {
+            logFetch("deviceInfo: (global.deviceInfoSystem missing)");
+        }
+    } catch (e) {
+        logFetch("deviceInfo error: " + e);
+    }
+}
+
 function getBlockText(blockScript) {
     if (!blockScript) {
         return null;
@@ -355,43 +382,143 @@ function buildFallbackAdventureGraph(prompt) {
 }
 
 function fetchStoryGraphFromApi(prompt, onDone) {
+    logFetch("--- start ---");
     var url = script.storyGraphApiUrl ? script.storyGraphApiUrl.trim() : "";
     if (url.length === 0 && STORY_GRAPH_API_URL_FALLBACK) {
         url = String(STORY_GRAPH_API_URL_FALLBACK).trim();
+        logFetch("using STORY_GRAPH_API_URL_FALLBACK (Inspector URL was empty)");
     }
+    logFetch("resolved URL: " + url);
+    logFetch("Inspector storyGraphApiUrl raw: " + (script.storyGraphApiUrl ? script.storyGraphApiUrl : "(empty)"));
+    logFetch("prompt length=" + String(prompt).length + " text=" + JSON.stringify(String(prompt).slice(0, 500)));
+
     if (!script.internetModule || url.length === 0) {
+        if (!script.internetModule) {
+            logFetch("ABORT: Internet Module not assigned");
+            print("LensController: Internet Module not assigned — assign Assets/Internet Module in Inspector (LensController).");
+        } else if (url.length === 0) {
+            logFetch("ABORT: no URL");
+            print("LensController: storyGraphApiUrl empty — set Inspector URL or STORY_GRAPH_API_URL_FALLBACK.");
+        }
         onDone(null);
         return;
     }
+    logFetchDeviceInfo();
+
+    // InternetModule.fetch is not available in Lens Studio preview / simulated platform — only on device in Snapchat.
     try {
-        var req = new Request(url, {
-            method: "POST",
-            body: JSON.stringify({ prompt: prompt }),
-            headers: { "Content-Type": "application/json" }
-        });
+        if (typeof global !== "undefined" && global.deviceInfoSystem && global.deviceInfoSystem.isEditor()) {
+            logFetch("ABORT: isEditor() — no fetch in Lens Studio preview");
+            print(
+                "LensController: Lens Studio preview has no Internet fetch — open this lens in Snapchat on a phone for live AI; using offline story."
+            );
+            onDone(null);
+            return;
+        }
+    } catch (skipE) {
+        logFetch("isEditor check skipped: " + skipE);
+    }
+
+    var requestBody = JSON.stringify({ prompt: prompt });
+    logFetch("request POST body: " + requestBody);
+    logFetch("calling internetModule.fetch …");
+
+    try {
+        // Lens runtime has no global Request — use fetch(url, options) per InternetModule API.
         script.internetModule
-            .fetch(req)
+            .fetch(url, {
+                method: "POST",
+                body: requestBody,
+                headers: { "Content-Type": "application/json" }
+            })
             .then(function (resp) {
-                if (!resp || resp.status !== 200) {
-                    print("LensController: API status " + (resp ? resp.status : "none"));
-                    return null;
+                logFetch("fetch promise resolved");
+                if (!resp) {
+                    logFetch("response object is null/undefined");
+                    print("LensController: API no response");
+                    return Promise.resolve(null);
                 }
-                return resp.json();
+                var status = resp.status;
+                var st = resp.statusText !== undefined ? resp.statusText : "";
+                var ok = resp.ok !== undefined ? resp.ok : false;
+                var respUrl = resp.url !== undefined ? resp.url : "";
+                logFetch("response status=" + status + " statusText=" + st + " ok=" + ok + " url=" + respUrl);
+                try {
+                    if (resp.headers) {
+                        var ct = resp.headers.get("content-type");
+                        var cl = resp.headers.get("content-length");
+                        logFetch("response headers content-type=" + ct + " content-length=" + cl);
+                    }
+                } catch (hErr) {
+                    logFetch("response headers (could not read): " + hErr);
+                }
+
+                return resp.text().then(function (text) {
+                    logFetch("response body length=" + String(text).length);
+                    logFetch("response body (raw): " + text);
+                    if (status !== 200) {
+                        logFetch("non-200 — skipping JSON parse");
+                        return null;
+                    }
+                    try {
+                        var parsed = JSON.parse(text);
+                        logFetch("JSON.parse OK keys=" + (parsed && typeof parsed === "object" ? Object.keys(parsed).join(",") : "(n/a)"));
+                        return parsed;
+                    } catch (parseErr) {
+                        logFetch("JSON.parse FAILED: " + parseErr);
+                        print("LensController: JSON parse failed " + parseErr);
+                        return null;
+                    }
+                });
             })
             .then(function (json) {
                 if (!json) {
+                    logFetch("pipeline: no json — onDone(null)");
                     onDone(null);
                     return;
                 }
+                if (json.error) {
+                    logFetch("json.error: " + JSON.stringify(json.error));
+                    print("LensController: API error field " + JSON.stringify(json.error));
+                }
                 var wrapped = json.graph ? json.graph : json;
-                onDone(normalizeGraph(wrapped));
+                logFetch("using " + (json.graph ? "json.graph" : "top-level json") + " as graph source");
+                var g = normalizeGraph(wrapped);
+                if (!g) {
+                    logFetch("normalizeGraph returned null");
+                    print("LensController: response missing valid graph shape");
+                } else {
+                    var nk = 0;
+                    for (var kid in g.nodes) {
+                        if (g.nodes.hasOwnProperty(kid)) {
+                            nk++;
+                        }
+                    }
+                    logFetch("normalizeGraph OK startId=" + g.startId + " nodeCount=" + nk);
+                }
+                logFetch("--- end (success path to onDone) ---");
+                onDone(g);
             })
             .catch(function (e) {
+                logFetch("fetch chain REJECTED: " + e);
                 print("LensController: fetch failed " + e);
                 onDone(null);
             });
     } catch (err) {
-        print("LensController: fetch setup failed " + err);
+        var errMsg = String(err && err.message !== undefined ? err.message : err);
+        logFetch("fetch THREW (sync): " + err);
+        if (
+            errMsg.indexOf("not available") !== -1 ||
+            errMsg.indexOf("simulated") !== -1 ||
+            errMsg.indexOf("simulator") !== -1
+        ) {
+            logFetch("treated as simulated / unavailable environment");
+            print(
+                "LensController: Internet fetch unavailable in this environment — use Snapchat on a device for live AI; using offline story."
+            );
+        } else {
+            print("LensController: fetch setup failed " + err);
+        }
         onDone(null);
     }
 }

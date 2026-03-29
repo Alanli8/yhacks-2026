@@ -47,8 +47,8 @@
       rightPopupText: !<reference.ScriptComponent> 00000000-0000-0000-0000-000000000000
       promptInputText: !<reference.Text> 00000000-0000-0000-0000-000000000000
       storyText: !<reference.Text> 00000000-0000-0000-0000-000000000000
-      internetModule: !<reference.InternetModule> 00000000-0000-0000-0000-000000000000
-      storyGraphApiUrl: ""
+      internetModule: !<reference.InternetModule> f0ace294-40e4-4ff2-bab1-e464d7f6c39e
+      storyGraphApiUrl: "https://yhacks-story-api.onrender.com/generate"
   ScriptTypes:
     -
       {}

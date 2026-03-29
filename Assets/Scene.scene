@@ -733,8 +733,8 @@
       rightPopupText: !<reference.ScriptComponent> 83962a46-d849-4532-8204-c49bc564c2e2
       promptInputText: !<reference.Text> f4cc73aa-8e53-4689-a1d5-4d6f3d3ea9f7
       storyText: !<reference.Text> 74c1ea50-2e65-4112-8344-c09fa056ed21
-      internetModule: !<reference.InternetModule> 00000000-0000-0000-0000-000000000000
-      storyGraphApiUrl: ""
+      internetModule: !<reference.InternetModule> f0ace294-40e4-4ff2-bab1-e464d7f6c39e
+      storyGraphApiUrl: "https://yhacks-story-api.onrender.com/generate"
   ScriptTypes:
     "":
       {}
@@ -869,9 +869,9 @@
   ForceBasic: true
   Anchor:
     left: -0.900000
-    bottom: -0.960000
+    bottom: -0.160000
     right: 0.900000
-    top: -0.700000
+    top: 0.160000
   Offset:
     left: 0.000000
     bottom: 0.000000
