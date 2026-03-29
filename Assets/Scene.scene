@@ -7,6 +7,8 @@
     - !<own> 47788a0e-16e3-4681-8712-46ffeb8c7233
     - !<own> cb2fd687-8a72-4549-a885-a2ba2eb12071
     - !<own> efb45779-38ff-4d11-971d-72d60c767fa7
+    - !<own> 7605e59c-3e5d-4986-aa66-4a891d522c59
+    - !<own> dbd4c098-a9da-4f7a-93a8-1bdc0ed35b8b
   layers: !<Layers/267ee9a7-aff2-4f9d-9a49-f71214747d03>
     userLayers:
       - id: 13
@@ -410,6 +412,22 @@
   ScriptTypes:
     "":
       {}
+- !<ScriptComponent/739eabc2-16f3-4317-a2ab-9e292044da4c>
+  PrefabRemaps:
+    []
+  Name: ChatGPT API 2
+  Enabled: true
+  ScriptAsset: !<reference> a9ace91b-d061-43f7-959b-70b4c5c71d82
+  ScriptInputsDefault:
+    {}
+  ScriptTypesDefault:
+    {}
+  ScriptInputs:
+    "":
+      remoteServiceModule: !<reference.RemoteServiceModule> 2c515cff-d4b5-44fa-ae38-94ac278aedfe
+  ScriptTypes:
+    "":
+      {}
 - !<Text/74c1ea50-2e65-4112-8344-c09fa056ed21>
   PrefabRemaps:
     []
@@ -493,6 +511,37 @@
     CapitalizationOverride: None
   DepthTest: false
   TwoSided: false
+- !<ScriptComponent/7546349d-1ae8-4381-9314-0ca3fd6c7165>
+  PrefabRemaps:
+    []
+  Name: ChatGPT API
+  Enabled: true
+  ScriptAsset: !<reference> 7d60d912-4ef3-4db2-9100-3bb938e09efb
+  ScriptInputsDefault:
+    {}
+  ScriptTypesDefault:
+    {}
+  ScriptInputs:
+    "":
+      remoteServiceModule: !<reference.RemoteServiceModule> d1d97822-d804-4282-9dc7-daa66fb97445
+  ScriptTypes:
+    "":
+      {}
+- !<SceneObject/7605e59c-3e5d-4986-aa66-4a891d522c59>
+  PrefabRemaps:
+    []
+  Name: ChatGPT API
+  Enabled: true
+  Layers: 1
+  LocalTransform: !<TransformEntity>
+    Position: {x: 0.000000, y: 0.000000, z: 0.000000}
+    Rotation: {x: 0.000000, y: 0.000000, z: 0.000000}
+    Scale: {x: 1.000000, y: 1.000000, z: 1.000000}
+    HasSegmentScaleCompensation: false
+  Children:
+    []
+  Components:
+    - !<own> 7546349d-1ae8-4381-9314-0ca3fd6c7165
 - !<ScriptComponent/83962a46-d849-4532-8204-c49bc564c2e2>
   PrefabRemaps:
     []
@@ -722,6 +771,7 @@
   Enabled: true
   ScriptAsset: !<reference> 2c38aaef-dfe7-47a4-b572-e27062611c30
   ScriptInputsDefault:
+    HTTPS: true
     internetModule: true
     remoteServiceModule: true
     storyGraphApiUrl: true
@@ -730,12 +780,13 @@
     {}
   ScriptInputs:
     "":
+      HTTPS: !<RequiredType.internetModule);> 00000000-0000-0000-0000-000000000000
       faceEvents: !<reference.ScriptComponent> e83e3620-b382-4a55-a2b7-1ed6c6371e4d
       leftPopupText: !<reference.ScriptComponent> 4fd0ddeb-ec0f-4b8f-bc37-8d94e3007c97
       rightPopupText: !<reference.ScriptComponent> 83962a46-d849-4532-8204-c49bc564c2e2
       promptInputText: !<reference.Text> f4cc73aa-8e53-4689-a1d5-4d6f3d3ea9f7
       storyText: !<reference.Text> 74c1ea50-2e65-4112-8344-c09fa056ed21
-      internetModule: !<reference.InternetModule> f0ace294-40e4-4ff2-bab1-e464d7f6c39e
+      internetModule: !<reference.InternetModule> 034d4686-f6e5-47b3-a499-86ec8058fa99
       remoteServiceModule: !<reference.RemoteServiceModule> 00000000-0000-0000-0000-000000000000
       storyGraphApiUrl: "https://yhacks-story-api.onrender.com/generate"
       storyApiDebugText: !<reference.Text> 00000000-0000-0000-0000-000000000000
@@ -757,6 +808,21 @@
     []
   Components:
     - !<own> c5cc90fd-7698-49a7-862d-369950f631ca
+- !<SceneObject/dbd4c098-a9da-4f7a-93a8-1bdc0ed35b8b>
+  PrefabRemaps:
+    []
+  Name: ChatGPT API
+  Enabled: true
+  Layers: 1
+  LocalTransform: !<TransformEntity>
+    Position: {x: 0.000000, y: 0.000000, z: 0.000000}
+    Rotation: {x: 0.000000, y: 0.000000, z: 0.000000}
+    Scale: {x: 1.000000, y: 1.000000, z: 1.000000}
+    HasSegmentScaleCompensation: false
+  Children:
+    []
+  Components:
+    - !<own> 739eabc2-16f3-4317-a2ab-9e292044da4c
 - !<Camera/ddc59de0-ba4d-46a4-bdf5-fc31fe32ff98>
   PrefabRemaps:
     []

@@ -19,17 +19,28 @@
 //
 // Story API: run the Node proxy in /server (LAVA_SECRET_KEY, npm start — Gemini via Lava gateway).
 // Set storyGraphApiUrl to https://<your-host>/generate — POST { "prompt": "..." }, response { "graph": { startId, nodes } }.
-// Use HTTPS + a tunnel (e.g. ngrok) when testing on device. Never put Lava or provider keys inside the lens.
-// HTTP: InternetModule/RemoteServiceModule — use fetch when present, else performHttpRequest + RemoteServiceHttpRequest.
-// Snap’s API exposes open internet mainly on Camera Kit & Spectacles; the main Snapchat app often has no fetch/performHttpRequest.
-// Enable Camera Kit in Project Settings, add Internet Module (+ optional Remote Service Module), assign on LensController.
-// InternetModule availability depends on target; offline fallback runs if fetch is unavailable or fails.
+// Use HTTPS. Never put Lava or provider keys inside the lens.
 //
-// Desktop Lens Studio preview: deviceInfo.isEditor() is true — InternetModule.fetch is NOT run (Snapchat-only).
-// To hit your /generate API you must run the lens in the Snapchat app on a phone. `print()` output from the phone
-// appears in Lens Studio only when the device is connected / remote logging is enabled; for a visible trace without
-// the console. If `storyApiDebugText` is unset, API lines are shown under "Generating…" on `storyText` during fetch.
-// SHOW_STORY_API_LOG_IN_LENS (below) appends the same "— API —" block to the main story while playing.
+// --- Lens HTTP (Camera Kit) — follow Snap’s guide ---
+// https://developers.snap.com/camera-kit/ar-content/guides/lens-http-requests
+//
+// Prerequisites (from guide): Camera Kit enabled in Project Info; Lens Studio 5.4+; Camera Kit SDKs (e.g. Android/iOS 1.37+,
+// Web 1.1.0+); Asset Library → Internet Module on this script (@input internetModule); HTTPS endpoint.
+//
+// Lens code: RemoteServiceHttpRequest.create(); set url, method (Post), body, contentType; call
+// script.internetModule.performHttpRequest(req, callback). On response: 200 = success; if status 400 and
+// res.headers['x-camera-kit-error-type'], body explains Camera Kit errors (see below). fetch() on the module is only a fallback.
+//
+// My Lenses Portal: register your API host/path in the allowlist (My APIs → Add API → Provided Processor + Snap Kit App ID).
+// Lens Studio skips endpoint verification during development; Camera Kit enforces the allowlist at runtime.
+// RequestValidationError in x-camera-kit-error-type usually means URL/method not allowlisted.
+// Other values: LensHttpHandlerError, UnknownError (see guide).
+//
+// Consumer Snapchat often does not expose arbitrary lens HTTPS; embed the lens in a Camera Kit app for your server URL.
+// Offline fallback runs if HTTP is unavailable or fails.
+//
+// Desktop Lens Studio: deviceInfo.isEditor() — this script skips live HTTP; test HTTP in a Camera Kit build or on device per guide.
+// If storyApiDebugText is unset, API lines show under "Generating…" on storyText. SHOW_STORY_API_LOG_IN_LENS appends API log to story.
 
 //@input Component.ScriptComponent faceEvents
 //@input Component.ScriptComponent leftPopupText
@@ -42,7 +53,7 @@
 //@input Component.Text storyApiDebugText
 
 // If Inspector "story Graph Api Url" is empty, this is used (e.g. paste your HTTPS deploy URL + /generate).
-var STORY_GRAPH_API_URL_FALLBACK = "";
+var STORY_GRAPH_API_URL_FALLBACK = "https://yhacks-story-api.onrender.com/generate";
 
 // When true, the rolling API log is appended to the main story text in the lens (visible in Snapchat preview / device).
 // Set to false before shipping to hide debug.
@@ -519,8 +530,8 @@ function getGlobalFetchIfAny() {
 }
 
 /**
- * Picks Internet Module or Remote Service Module if they expose HTTP.
- * If not, falls back to global fetch when available (rare but helps some builds).
+ * Picks InternetModule/RemoteServiceModule for HTTP. Prefers performHttpRequest + RemoteServiceHttpRequest;
+ * uses fetch only if no module exposes performHttpRequest.
  */
 function pickHttpModule() {
     var im = script.internetModule;
@@ -529,16 +540,23 @@ function pickHttpModule() {
     var hasPerfIm = isFn(im, "performHttpRequest");
     var hasFetchRm = isFn(rm, "fetch");
     var hasPerfRm = isFn(rm, "performHttpRequest");
-    if (hasFetchIm || hasPerfIm) {
-        return { m: im, hasFetch: hasFetchIm, hasPerform: hasPerfIm, globalFetch: null };
+
+    if (hasPerfIm) {
+        return { m: im, mode: "perform", globalFetch: null };
     }
-    if (hasFetchRm || hasPerfRm) {
-        return { m: rm, hasFetch: hasFetchRm, hasPerform: hasPerfRm, globalFetch: null };
+    if (hasPerfRm) {
+        return { m: rm, mode: "perform", globalFetch: null };
+    }
+    if (hasFetchIm) {
+        return { m: im, mode: "fetch", globalFetch: null };
+    }
+    if (hasFetchRm) {
+        return { m: rm, mode: "fetch", globalFetch: null };
     }
     var gf = getGlobalFetchIfAny();
     if (gf) {
-        logFetch("pickHttpModule: using global fetch (InternetModule had no HTTP methods)");
-        return { m: im, hasFetch: true, hasPerform: false, globalFetch: gf };
+        logFetch("pickHttpModule: using global fetch (no performHttpRequest on modules)");
+        return { m: im, mode: "fetch", globalFetch: gf };
     }
     logFetch(
         "pickHttpModule: no HTTP — im=" +
@@ -553,6 +571,45 @@ function pickHttpModule() {
             (typeof fetch === "undefined" ? "undefined" : typeof fetch)
     );
     return null;
+}
+
+/**
+ * Routes RemoteServiceHttpResponse from InternetModule.performHttpRequest (Camera Kit pattern).
+ */
+function handleStoryApiRemoteResponse(resp, onDone) {
+    if (!resp) {
+        logFetch("performHttpRequest: null response");
+        logStoryApiLoud("HTTP RESPONSE ERROR", "performHttpRequest returned null.");
+        applyStoryGraphResponse(null, onDone);
+        return;
+    }
+    var status = resp.statusCode;
+    var body = resp.body || "";
+    var hdrs = resp.headers || {};
+    logFetch("performHttpRequest statusCode=" + status + " bodyLen=" + String(body).length);
+    logStoryApiLoud("HTTP RESPONSE RECEIVED", "status=" + status + " ok=" + (status === 200));
+
+    if (status === 200) {
+        parseJsonTextToStoryGraph(body, status, onDone);
+        return;
+    }
+    if (status === 400 && hdrs["x-camera-kit-error-type"]) {
+        var ckErr = String(hdrs["x-camera-kit-error-type"]);
+        logFetch("Camera Kit x-camera-kit-error-type=" + ckErr);
+        var hint = "";
+        if (ckErr === "RequestValidationError") {
+            hint = " (allowlist URL in My Lenses Portal — lens HTTP guide)";
+        } else if (ckErr === "LensHttpHandlerError") {
+            hint = " (Camera Kit lensHttpHandler)";
+        }
+        logStoryApiLoud("HTTP 400 (Camera Kit)", ckErr + hint + " — " + String(body).slice(0, 320));
+        print("LensController: Camera Kit HTTP error [" + ckErr + "]: " + body);
+        applyStoryGraphResponse(null, onDone);
+        return;
+    }
+    logFetch("Unexpected HTTP status code " + status);
+    logStoryApiLoud("HTTP NON-OK — NO GRAPH", "status=" + status + " body preview: " + String(body).slice(0, 120));
+    applyStoryGraphResponse(null, onDone);
 }
 
 function parseJsonTextToStoryGraph(text, httpStatus, onDone) {
@@ -595,16 +652,15 @@ function fetchStoryGraphFromApi(prompt, onDone) {
     }
     logFetchDeviceInfo();
 
-    // InternetModule.fetch is not available in Lens Studio preview / simulated platform — only on device in Snapchat.
     try {
         if (typeof global !== "undefined" && global.deviceInfoSystem && global.deviceInfoSystem.isEditor()) {
-            logFetch("ABORT: isEditor() — no fetch in Lens Studio preview");
+            logFetch("ABORT: isEditor() — no lens HTTP in Lens Studio preview (see Snap lens HTTP guide)");
             logStoryApiLoud(
                 "NO HTTP REQUEST (preview)",
-                "isEditor() — open in Snapchat on a device for live API; using offline story."
+                "Editor preview skips live HTTP. Test in a Camera Kit app with allowlisted API, or on device per Snap guide."
             );
             print(
-                "LensController: Lens Studio preview has no Internet fetch — open this lens in Snapchat on a phone for live AI; using offline story."
+                "LensController: preview — no HTTP; use Camera Kit + allowlist: https://developers.snap.com/camera-kit/ar-content/guides/lens-http-requests"
             );
             onDone(null);
             return;
@@ -613,42 +669,73 @@ function fetchStoryGraphFromApi(prompt, onDone) {
         logFetch("isEditor check skipped: " + skipE);
     }
 
-    var requestBody = JSON.stringify({ prompt: prompt });
-    logFetch("request POST body: " + requestBody);
-    logStoryApiLoud("RUNNING HTTP POST /generate", "URL: " + url);
-    logStoryApiLoud("REQUEST BODY (prompt)", String(prompt).slice(0, 200) + (String(prompt).length > 200 ? "…" : ""));
+    var getUrl = url + "?prompt=" + encodeURIComponent(String(prompt).slice(0, 1000));
+    logFetch("request GET url: " + getUrl);
+    logStoryApiLoud("RUNNING HTTP GET /generate", "prompt=" + String(prompt).slice(0, 200));
 
     var picked = pickHttpModule();
     if (!picked) {
-        logFetch("ABORT: no module exposes fetch or performHttpRequest");
-        logStoryApiLoud(
-            "NO HTTP API",
-            "This Snapchat build has no fetch/HTTP on Internet Module. Enable Camera Kit in Project Info, rebuild, test in Camera Kit / Spectacles. Offline story works."
-        );
-        print(
-            "LensController: assign Internet Module or Remote Service Module; enable Camera Kit for open HTTP. See Lens HTTP docs."
-        );
+        logFetch("ABORT: no module exposes performHttpRequest or fetch");
+        var im0 = script.internetModule;
+        var rm0 = script.remoteServiceModule;
+        var missingAssets = !im0 && !rm0;
+        if (missingAssets) {
+            logStoryApiLoud(
+                "NO HTTP API",
+                "Assign assets on this script: Asset Library → Internet Module → drag to 'internet Module'. Optionally 'remote Service Module'. Push to device again."
+            );
+            print(
+                "LensController: internetModule not set — assign Internet Module on LensController in Inspector."
+            );
+        } else {
+            logStoryApiLoud(
+                "NO HTTP API (consumer Snapchat)",
+                "Internet Module is assigned but performHttpRequest/fetch are not exposed here. Consumer Snapchat blocks open HTTP to custom URLs. Fix: run this lens inside a Camera Kit app and allowlist https://yhacks-story-api.onrender.com in My Lenses Portal."
+            );
+            print(
+                "LensController: consumer Snapchat blocks lens HTTP. Use a Camera Kit app + allowlist your host. Guide: https://developers.snap.com/camera-kit/ar-content/guides/lens-http-requests"
+            );
+        }
         onDone(null);
         return;
     }
     var im = picked.m;
-    var hasFetch = picked.hasFetch;
-    var hasPerformHttp = picked.hasPerform;
     var globalFetchFn = picked.globalFetch;
 
-    if (hasFetch) {
-        logFetch(globalFetchFn ? "using global fetch (POST) …" : "using module.fetch (POST) …");
+    if (picked.mode === "perform") {
+        logFetch("using InternetModule.performHttpRequest + RemoteServiceHttpRequest (GET) …");
+        try {
+            if (typeof RemoteServiceHttpRequest === "undefined" || !RemoteServiceHttpRequest.create) {
+                logStoryApiLoud("HTTP FAILED", "RemoteServiceHttpRequest missing — cannot GET.");
+                onDone(null);
+                return;
+            }
+            var httpReq = RemoteServiceHttpRequest.create();
+            httpReq.url = getUrl;
+            httpReq.method = RemoteServiceHttpRequest.HttpRequestMethod.Get;
+
+            im.performHttpRequest(httpReq, function (resp) {
+                handleStoryApiRemoteResponse(resp, onDone);
+            });
+        } catch (err2) {
+            var errMsg2 = String(err2 && err2.message !== undefined ? err2.message : err2);
+            logFetch("performHttpRequest THREW: " + err2);
+            logStoryApiLoud("HTTP REQUEST FAILED", errMsg2);
+            print("LensController: performHttpRequest failed " + err2);
+            onDone(null);
+        }
+        return;
+    }
+
+    if (picked.mode === "fetch") {
+        logFetch(globalFetchFn ? "using global fetch (GET) …" : "using module.fetch (GET) …");
         try {
             var fetchCall = globalFetchFn
                 ? globalFetchFn
                 : function (u, opts) {
                       return im.fetch(u, opts);
                   };
-            fetchCall(url, {
-                method: "POST",
-                body: requestBody,
-                headers: { "Content-Type": "application/json" }
-            }).then(function (resp) {
+            fetchCall(getUrl, { method: "GET" }).then(function (resp) {
                     logFetch("fetch promise resolved");
                     if (!resp) {
                         logFetch("response object is null/undefined");
@@ -705,39 +792,8 @@ function fetchStoryGraphFromApi(prompt, onDone) {
         return;
     }
 
-    logFetch("using module.performHttpRequest (POST) — fetch() not available on this platform …");
-    try {
-        if (typeof RemoteServiceHttpRequest === "undefined" || !RemoteServiceHttpRequest.create) {
-            logStoryApiLoud("HTTP FAILED", "RemoteServiceHttpRequest missing — cannot POST.");
-            onDone(null);
-            return;
-        }
-        var httpReq = RemoteServiceHttpRequest.create();
-        httpReq.url = url;
-        var httpMethod = RemoteServiceHttpRequest.HttpRequestMethod;
-        httpReq.method = httpMethod && httpMethod.Post !== undefined ? httpMethod.Post : 1;
-        httpReq.body = requestBody;
-        httpReq.contentType = "application/json";
-
-        im.performHttpRequest(httpReq, function (resp) {
-            if (!resp) {
-                logFetch("performHttpRequest: null response");
-                logStoryApiLoud("HTTP RESPONSE ERROR", "performHttpRequest returned null.");
-                applyStoryGraphResponse(null, onDone);
-                return;
-            }
-            var status = resp.statusCode;
-            logFetch("performHttpRequest statusCode=" + status + " bodyLen=" + String(resp.body || "").length);
-            logStoryApiLoud("HTTP RESPONSE RECEIVED", "status=" + status + " ok=" + (status === 200));
-            parseJsonTextToStoryGraph(resp.body || "", status, onDone);
-        });
-    } catch (err2) {
-        var errMsg2 = String(err2 && err2.message !== undefined ? err2.message : err2);
-        logFetch("performHttpRequest THREW: " + err2);
-        logStoryApiLoud("HTTP REQUEST FAILED", errMsg2);
-        print("LensController: performHttpRequest failed " + err2);
-        onDone(null);
-    }
+    logFetch("ABORT: unexpected pickHttpModule result");
+    onDone(null);
 }
 
 function beginAdventureWithGraph(g) {

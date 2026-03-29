@@ -26,6 +26,7 @@
   ExportUid: 00000000-0000-0000-0000-000000000000
   PackagePolicy: CanBeUnpacked
   ScriptInputsHidden:
+    HTTPS: false
     faceEvents: false
     internetModule: false
     leftPopupText: false
@@ -44,12 +45,13 @@
   Attachments:
     []
   DefaultScriptInputs:
-    - faceEvents: !<reference.ScriptComponent> 00000000-0000-0000-0000-000000000000
+    - HTTPS: !<RequiredType.internetModule);> 00000000-0000-0000-0000-000000000000
+      faceEvents: !<reference.ScriptComponent> 00000000-0000-0000-0000-000000000000
       leftPopupText: !<reference.ScriptComponent> 00000000-0000-0000-0000-000000000000
       rightPopupText: !<reference.ScriptComponent> 00000000-0000-0000-0000-000000000000
       promptInputText: !<reference.Text> 00000000-0000-0000-0000-000000000000
       storyText: !<reference.Text> 00000000-0000-0000-0000-000000000000
-      internetModule: !<reference.InternetModule> f0ace294-40e4-4ff2-bab1-e464d7f6c39e
+      internetModule: !<reference.InternetModule> 034d4686-f6e5-47b3-a499-86ec8058fa99
       remoteServiceModule: !<reference.RemoteServiceModule> 00000000-0000-0000-0000-000000000000
       storyGraphApiUrl: "https://yhacks-story-api.onrender.com/generate"
       storyApiDebugText: !<reference.Text> 00000000-0000-0000-0000-000000000000

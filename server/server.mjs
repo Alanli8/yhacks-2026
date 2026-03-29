@@ -209,7 +209,7 @@ function sendJson(res, status, obj) {
     "Content-Length": Buffer.byteLength(body),
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   });
   res.end(body);
 }
@@ -221,20 +221,25 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(204, {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Headers": "Content-Type",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     });
     res.end();
     return;
   }
 
-  if (req.method === "POST" && url.pathname === "/generate") {
-    let raw = "";
+  if (url.pathname === "/generate" && (req.method === "GET" || req.method === "POST")) {
+    let prompt = "";
     try {
-      for await (const chunk of req) {
-        raw += chunk;
+      if (req.method === "GET") {
+        prompt = (url.searchParams.get("prompt") || "").trim();
+      } else {
+        let raw = "";
+        for await (const chunk of req) {
+          raw += chunk;
+        }
+        const body = raw ? JSON.parse(raw) : {};
+        prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
       }
-      const body = raw ? JSON.parse(raw) : {};
-      const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
       if (!prompt) {
         sendJson(res, 400, { error: "Missing prompt" });
         return;

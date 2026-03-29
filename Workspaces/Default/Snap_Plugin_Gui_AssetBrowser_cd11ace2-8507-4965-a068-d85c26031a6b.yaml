@@ -1,8 +1,14 @@
 CollapsedEntities:
   type: stringset
   value:
-    size: 8
+    size: 14
     values:
+      - ChatGPT 2.remoteServiceModule
+      - ChatGPT API 2.js
+      - ChatGPT API Module 2.js
+      - ChatGPT API Module.js
+      - ChatGPT API.js
+      - ChatGPT.remoteServiceModule
       - Easy Lens/Lens Components
       - Easy Lens/Lens Components/Face Events_5.9.lsc
       - Easy Lens/Lens Components/Screen Text_5.12.lsc
