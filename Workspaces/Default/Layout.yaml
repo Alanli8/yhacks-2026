@@ -42,10 +42,10 @@ dock:
         type: section
         current: 0
     sizes:
-      - 196
-      - 336
-      - 358
-      - 231
+      - 236
+      - 455
+      - 382
+      - 279
     type: splitter
     orientation: horizontal
   windows:
@@ -64,20 +64,4 @@ dock:
         y: 498
         w: 239
         h: 362
-      screen: Built-in Retina Display
-    - items:
-        - items:
-            - persistentName: Snap.Plugin.Gui.AssetLibraryPanel
-              Uuid: 0c6786c9-3282-45d6-ad4e-491240e1551d
-          type: section
-          current: 0
-      sizes:
-        - 687
-      type: splitter
-      orientation: vertical
-      geometry:
-        x: 158
-        y: 99
-        w: 1124
-        h: 689
       screen: Built-in Retina Display

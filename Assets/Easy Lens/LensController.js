@@ -47,17 +47,12 @@
 //@input Component.ScriptComponent rightPopupText
 //@input Component.Text promptInputText
 //@input Component.Text storyText
-//@input Asset.InternetModule internetModule
 //@input Asset.RemoteServiceModule remoteServiceModule
-//@input string storyGraphApiUrl
 //@input Component.Text storyApiDebugText
-
-// If Inspector "story Graph Api Url" is empty, this is used (e.g. paste your HTTPS deploy URL + /generate).
-var STORY_GRAPH_API_URL_FALLBACK = "https://yhacks-story-api.onrender.com/generate";
 
 // When true, the rolling API log is appended to the main story text in the lens (visible in Snapchat preview / device).
 // Set to false before shipping to hide debug.
-var SHOW_STORY_API_LOG_IN_LENS = true;
+var SHOW_STORY_API_LOG_IN_LENS = false;
 
 var userPrompt = "";
 var gamePhase = "prompt";
@@ -82,23 +77,25 @@ function clearStoryApiDebugOverlay() {
 var storyApiDebugLines = [];
 
 function refreshStoryApiDebugUi() {
-    var body = storyApiDebugLines.join("\n");
-    if (script.storyApiDebugText) {
-        script.storyApiDebugText.text = body;
-        var dbgSo = script.storyApiDebugText.getSceneObject();
-        if (dbgSo) {
-            dbgSo.enabled = true;
-        }
-        return;
-    }
-    if (script.storyText && gamePhase === "generating") {
-        script.storyText.text =
-            "Generating your branching story…\n\n— API —\n" + body;
-        var storySo = script.storyText.getSceneObject();
-        if (storySo) {
-            storySo.enabled = true;
-        }
-    }
+    // API debug UI disabled (storyApiDebugText / "— API —" on storyText while generating).
+    return;
+    // var body = storyApiDebugLines.join("\n");
+    // if (script.storyApiDebugText) {
+    //     script.storyApiDebugText.text = body;
+    //     var dbgSo = script.storyApiDebugText.getSceneObject();
+    //     if (dbgSo) {
+    //         dbgSo.enabled = true;
+    //     }
+    //     return;
+    // }
+    // if (script.storyText && gamePhase === "generating") {
+    //     script.storyText.text =
+    //         "Generating your branching story…\n\n— API —\n" + body;
+    //     var storySo = script.storyText.getSceneObject();
+    //     if (storySo) {
+    //         storySo.enabled = true;
+    //     }
+    // }
 }
 
 function pushStoryApiDebugOverlay(line) {
@@ -505,33 +502,25 @@ function applyStoryGraphResponse(json, onDone) {
     onDone(g);
 }
 
-/** True if callable (own or bracket — some builds differ). */
-function isFn(obj, key) {
-    if (!obj) {
-        return false;
-    }
-    var f = obj[key];
-    return typeof f === "function";
-}
-
-/** Some runtimes expose fetch globally even when InternetModule has no methods. */
-function getGlobalFetchIfAny() {
-    try {
-        if (typeof fetch === "function") {
-            return fetch;
-        }
-    } catch (e1) {}
-    try {
-        if (typeof global !== "undefined" && typeof global.fetch === "function") {
-            return global.fetch;
-        }
-    } catch (e2) {}
-    return null;
-}
+// System prompt embedded in the lens — no server needed.
+var CHATGPT_SYSTEM_PROMPT =
+    "You are a narrative engine for a branching Snapchat lens. " +
+    "Output ONE JSON object only — no markdown, no code fences, no extra keys.\n\n" +
+    "Schema: {\"startId\":string,\"nodes\":{\"<id>\":{\"narrative\":string,\"prompt\":string," +
+    "\"leftLabel\":string,\"rightLabel\":string,\"leftNext\":string|null,\"rightNext\":string|null,\"isEnding\":boolean}}}\n\n" +
+    "Rules:\n" +
+    "- Non-ending nodes MUST have leftNext and rightNext as non-null ids pointing at existing nodes.\n" +
+    "- Ending nodes: leftNext and rightNext null, prompt empty string, leftLabel and rightLabel \"Play again\", isEnding true.\n" +
+    "- At least 4 distinct endings. At least 3 layers of choices before any ending.\n" +
+    "- All ids referenced in leftNext/rightNext and startId must exist in nodes.\n" +
+    "- Keep narrative under 120 words per node; prompt is one short question.\n" +
+    "- Match tone and setting to the user prompt.\n" +
+    "- Output JSON only.";
 
 /**
  * Picks InternetModule/RemoteServiceModule for HTTP. Prefers performHttpRequest + RemoteServiceHttpRequest;
  * uses fetch only if no module exposes performHttpRequest.
+ * (Kept as fallback path — primary path is ChatGPT Remote Service Module.)
  */
 function pickHttpModule() {
     var im = script.internetModule;
@@ -612,15 +601,9 @@ function handleStoryApiRemoteResponse(resp, onDone) {
     applyStoryGraphResponse(null, onDone);
 }
 
-function parseJsonTextToStoryGraph(text, httpStatus, onDone) {
+function parseJsonTextToStoryGraph(text, onDone) {
     logFetch("response body length=" + String(text).length);
     logFetch("response body (raw): " + text);
-    if (httpStatus !== 200) {
-        logFetch("non-200 — skipping JSON parse");
-        logStoryApiLoud("HTTP NON-OK — NO GRAPH", "status=" + httpStatus + " body preview: " + String(text).slice(0, 120));
-        applyStoryGraphResponse(null, onDone);
-        return;
-    }
     try {
         var parsed = JSON.parse(text);
         logFetch("JSON.parse OK keys=" + (parsed && typeof parsed === "object" ? Object.keys(parsed).join(",") : "(n/a)"));
@@ -633,167 +616,71 @@ function parseJsonTextToStoryGraph(text, httpStatus, onDone) {
 }
 
 function fetchStoryGraphFromApi(prompt, onDone) {
-    logFetch("--- start ---");
-    var url = script.storyGraphApiUrl ? script.storyGraphApiUrl.trim() : "";
-    if (url.length === 0 && STORY_GRAPH_API_URL_FALLBACK) {
-        url = String(STORY_GRAPH_API_URL_FALLBACK).trim();
-        logFetch("using STORY_GRAPH_API_URL_FALLBACK (Inspector URL was empty)");
-    }
-    logFetch("resolved URL: " + url);
-    logFetch("Inspector storyGraphApiUrl raw: " + (script.storyGraphApiUrl ? script.storyGraphApiUrl : "(empty)"));
-    logFetch("prompt length=" + String(prompt).length + " text=" + JSON.stringify(String(prompt).slice(0, 500)));
-
-    if (url.length === 0) {
-        logFetch("ABORT: no URL");
-        logStoryApiLoud("NO HTTP REQUEST", "storyGraphApiUrl is empty — set Inspector or STORY_GRAPH_API_URL_FALLBACK.");
-        print("LensController: storyGraphApiUrl empty — set Inspector URL or STORY_GRAPH_API_URL_FALLBACK.");
-        onDone(null);
-        return;
-    }
+    logFetch("--- start (ChatGPT Remote Service) ---");
     logFetchDeviceInfo();
 
-    try {
-        if (typeof global !== "undefined" && global.deviceInfoSystem && global.deviceInfoSystem.isEditor()) {
-            logFetch("ABORT: isEditor() — no lens HTTP in Lens Studio preview (see Snap lens HTTP guide)");
-            logStoryApiLoud(
-                "NO HTTP REQUEST (preview)",
-                "Editor preview skips live HTTP. Test in a Camera Kit app with allowlisted API, or on device per Snap guide."
-            );
-            print(
-                "LensController: preview — no HTTP; use Camera Kit + allowlist: https://developers.snap.com/camera-kit/ar-content/guides/lens-http-requests"
-            );
-            onDone(null);
-            return;
-        }
-    } catch (skipE) {
-        logFetch("isEditor check skipped: " + skipE);
-    }
-
-    var getUrl = url + "?prompt=" + encodeURIComponent(String(prompt).slice(0, 1000));
-    logFetch("request GET url: " + getUrl);
-    logStoryApiLoud("RUNNING HTTP GET /generate", "prompt=" + String(prompt).slice(0, 200));
-
-    var picked = pickHttpModule();
-    if (!picked) {
-        logFetch("ABORT: no module exposes performHttpRequest or fetch");
-        var im0 = script.internetModule;
-        var rm0 = script.remoteServiceModule;
-        var missingAssets = !im0 && !rm0;
-        if (missingAssets) {
-            logStoryApiLoud(
-                "NO HTTP API",
-                "Assign assets on this script: Asset Library → Internet Module → drag to 'internet Module'. Optionally 'remote Service Module'. Push to device again."
-            );
-            print(
-                "LensController: internetModule not set — assign Internet Module on LensController in Inspector."
-            );
-        } else {
-            logStoryApiLoud(
-                "NO HTTP API (consumer Snapchat)",
-                "Internet Module is assigned but performHttpRequest/fetch are not exposed here. Consumer Snapchat blocks open HTTP to custom URLs. Fix: run this lens inside a Camera Kit app and allowlist https://yhacks-story-api.onrender.com in My Lenses Portal."
-            );
-            print(
-                "LensController: consumer Snapchat blocks lens HTTP. Use a Camera Kit app + allowlist your host. Guide: https://developers.snap.com/camera-kit/ar-content/guides/lens-http-requests"
-            );
-        }
+    var chatGptModule = script.remoteServiceModule;
+    if (!chatGptModule) {
+        logStoryApiLoud(
+            "NO CHATGPT MODULE",
+            "Assign ChatGPT.remoteServiceModule to 'remote Service Module' in Inspector."
+        );
+        print("LensController: remoteServiceModule not set — drag ChatGPT asset to Inspector.");
         onDone(null);
         return;
     }
-    var im = picked.m;
-    var globalFetchFn = picked.globalFetch;
 
-    if (picked.mode === "perform") {
-        logFetch("using InternetModule.performHttpRequest + RemoteServiceHttpRequest (GET) …");
+    logStoryApiLoud("CALLING CHATGPT API", "prompt=" + String(prompt).slice(0, 120));
+
+    var Module = require("../ChatGPT API Module");
+    var api = new Module.ApiModule(chatGptModule);
+
+    var userMessage =
+        "Adventure prompt from the player:\n\"\"\"" +
+        String(prompt).slice(0, 1000) +
+        "\"\"\"\n\nReturn the story graph JSON only.";
+
+    api.completions({
+        body: JSON.stringify({
+            model: "gpt-4o-mini",
+            messages: [
+                { role: "system", content: CHATGPT_SYSTEM_PROMPT },
+                { role: "user", content: userMessage }
+            ],
+            temperature: 0.85
+        })
+    }).then(function (response) {
+        logFetch("ChatGPT response received statusCode=" + response.statusCode);
+        var data;
         try {
-            if (typeof RemoteServiceHttpRequest === "undefined" || !RemoteServiceHttpRequest.create) {
-                logStoryApiLoud("HTTP FAILED", "RemoteServiceHttpRequest missing — cannot GET.");
-                onDone(null);
-                return;
-            }
-            var httpReq = RemoteServiceHttpRequest.create();
-            httpReq.url = getUrl;
-            httpReq.method = RemoteServiceHttpRequest.HttpRequestMethod.Get;
-
-            im.performHttpRequest(httpReq, function (resp) {
-                handleStoryApiRemoteResponse(resp, onDone);
-            });
-        } catch (err2) {
-            var errMsg2 = String(err2 && err2.message !== undefined ? err2.message : err2);
-            logFetch("performHttpRequest THREW: " + err2);
-            logStoryApiLoud("HTTP REQUEST FAILED", errMsg2);
-            print("LensController: performHttpRequest failed " + err2);
-            onDone(null);
+            data = response.bodyAsJson();
+        } catch (e) {
+            logStoryApiLoud("CHATGPT PARSE ERROR", String(e));
+            print("LensController: ChatGPT body parse failed: " + e);
+            applyStoryGraphResponse(null, onDone);
+            return;
         }
-        return;
-    }
-
-    if (picked.mode === "fetch") {
-        logFetch(globalFetchFn ? "using global fetch (GET) …" : "using module.fetch (GET) …");
-        try {
-            var fetchCall = globalFetchFn
-                ? globalFetchFn
-                : function (u, opts) {
-                      return im.fetch(u, opts);
-                  };
-            fetchCall(getUrl, { method: "GET" }).then(function (resp) {
-                    logFetch("fetch promise resolved");
-                    if (!resp) {
-                        logFetch("response object is null/undefined");
-                        logStoryApiLoud("HTTP RESPONSE ERROR", "Response object was null.");
-                        print("LensController: API no response");
-                        applyStoryGraphResponse(null, onDone);
-                        return;
-                    }
-                    var status = resp.status;
-                    var st = resp.statusText !== undefined ? resp.statusText : "";
-                    var ok = resp.ok !== undefined ? resp.ok : false;
-                    var respUrl = resp.url !== undefined ? resp.url : "";
-                    logFetch("response status=" + status + " statusText=" + st + " ok=" + ok + " url=" + respUrl);
-                    logStoryApiLoud("HTTP RESPONSE RECEIVED", "status=" + status + " ok=" + ok);
-                    try {
-                        if (resp.headers) {
-                            var ct = resp.headers.get("content-type");
-                            var cl = resp.headers.get("content-length");
-                            logFetch("response headers content-type=" + ct + " content-length=" + cl);
-                        }
-                    } catch (hErr) {
-                        logFetch("response headers (could not read): " + hErr);
-                    }
-
-                    return resp.text().then(function (text) {
-                        parseJsonTextToStoryGraph(text, status, onDone);
-                    });
-                })
-                .catch(function (e) {
-                    logFetch("fetch chain REJECTED: " + e);
-                    logStoryApiLoud("FETCH REJECTED / NETWORK ERROR", String(e));
-                    print("LensController: fetch failed " + e);
-                    onDone(null);
-                });
-        } catch (err) {
-            var errMsg = String(err && err.message !== undefined ? err.message : err);
-            logFetch("fetch THREW (sync): " + err);
-            if (
-                errMsg.indexOf("not available") !== -1 ||
-                errMsg.indexOf("simulated") !== -1 ||
-                errMsg.indexOf("simulator") !== -1
-            ) {
-                logFetch("treated as simulated / unavailable environment");
-                logStoryApiLoud("FETCH UNAVAILABLE (simulator)", errMsg);
-                print(
-                    "LensController: Internet fetch unavailable in this environment — use Snapchat on a device for live AI; using offline story."
-                );
-            } else {
-                logStoryApiLoud("FETCH SETUP FAILED", errMsg);
-                print("LensController: fetch setup failed " + err);
+        var text = "";
+        if (data.choices && data.choices.length > 0) {
+            var choice = data.choices[0];
+            if (choice.message && choice.message.content) {
+                text = choice.message.content;
+            } else if (typeof choice.text === "string") {
+                text = choice.text;
             }
-            onDone(null);
         }
-        return;
-    }
-
-    logFetch("ABORT: unexpected pickHttpModule result");
-    onDone(null);
+        if (!text) {
+            logStoryApiLoud("CHATGPT EMPTY", "No content in choices. Body: " + String(response.bodyAsString()).slice(0, 200));
+            applyStoryGraphResponse(null, onDone);
+            return;
+        }
+        logStoryApiLoud("CHATGPT OK — PARSING GRAPH", "content length=" + text.length);
+        parseJsonTextToStoryGraph(text, onDone);
+    }).catch(function (err) {
+        logStoryApiLoud("CHATGPT ERROR", String(err));
+        print("LensController: ChatGPT API error: " + err);
+        applyStoryGraphResponse(null, onDone);
+    });
 }
 
 function beginAdventureWithGraph(g) {
@@ -916,10 +803,10 @@ initPrompt();
 
 script.createEvent("OnStartEvent").bind(function () {
     styleOptionsUnselected();
-    if (script.storyApiDebugText) {
-        script.storyApiDebugText.text =
-            "API debug: submit a prompt. Preview=no net. Snapchat=live.";
-    }
+    // if (script.storyApiDebugText) {
+    //     script.storyApiDebugText.text =
+    //         "API debug: submit a prompt. Preview=no net. Snapchat=live.";
+    // }
 });
 
 try {

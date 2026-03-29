@@ -28,13 +28,11 @@
   ScriptInputsHidden:
     HTTPS: false
     faceEvents: false
-    internetModule: false
     leftPopupText: false
     promptInputText: false
     remoteServiceModule: false
     rightPopupText: false
     storyApiDebugText: false
-    storyGraphApiUrl: false
     storyText: false
   ScriptTypesHidden:
     {}
@@ -51,9 +49,7 @@
       rightPopupText: !<reference.ScriptComponent> 00000000-0000-0000-0000-000000000000
       promptInputText: !<reference.Text> 00000000-0000-0000-0000-000000000000
       storyText: !<reference.Text> 00000000-0000-0000-0000-000000000000
-      internetModule: !<reference.InternetModule> 034d4686-f6e5-47b3-a499-86ec8058fa99
-      remoteServiceModule: !<reference.RemoteServiceModule> 00000000-0000-0000-0000-000000000000
-      storyGraphApiUrl: "https://yhacks-story-api.onrender.com/generate"
+      remoteServiceModule: !<reference.RemoteServiceModule> d1d97822-d804-4282-9dc7-daa66fb97445
       storyApiDebugText: !<reference.Text> 00000000-0000-0000-0000-000000000000
   ScriptTypes:
     -
