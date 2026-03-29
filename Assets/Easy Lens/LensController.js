@@ -20,7 +20,16 @@
 // Story API: run the Node proxy in /server (LAVA_SECRET_KEY, npm start — Gemini via Lava gateway).
 // Set storyGraphApiUrl to https://<your-host>/generate — POST { "prompt": "..." }, response { "graph": { startId, nodes } }.
 // Use HTTPS + a tunnel (e.g. ngrok) when testing on device. Never put Lava or provider keys inside the lens.
+// HTTP: InternetModule/RemoteServiceModule — use fetch when present, else performHttpRequest + RemoteServiceHttpRequest.
+// Snap’s API exposes open internet mainly on Camera Kit & Spectacles; the main Snapchat app often has no fetch/performHttpRequest.
+// Enable Camera Kit in Project Settings, add Internet Module (+ optional Remote Service Module), assign on LensController.
 // InternetModule availability depends on target; offline fallback runs if fetch is unavailable or fails.
+//
+// Desktop Lens Studio preview: deviceInfo.isEditor() is true — InternetModule.fetch is NOT run (Snapchat-only).
+// To hit your /generate API you must run the lens in the Snapchat app on a phone. `print()` output from the phone
+// appears in Lens Studio only when the device is connected / remote logging is enabled; for a visible trace without
+// the console. If `storyApiDebugText` is unset, API lines are shown under "Generating…" on `storyText` during fetch.
+// SHOW_STORY_API_LOG_IN_LENS (below) appends the same "— API —" block to the main story while playing.
 
 //@input Component.ScriptComponent faceEvents
 //@input Component.ScriptComponent leftPopupText
@@ -28,10 +37,16 @@
 //@input Component.Text promptInputText
 //@input Component.Text storyText
 //@input Asset.InternetModule internetModule
+//@input Asset.RemoteServiceModule remoteServiceModule
 //@input string storyGraphApiUrl
+//@input Component.Text storyApiDebugText
 
 // If Inspector "story Graph Api Url" is empty, this is used (e.g. paste your HTTPS deploy URL + /generate).
 var STORY_GRAPH_API_URL_FALLBACK = "";
+
+// When true, the rolling API log is appended to the main story text in the lens (visible in Snapchat preview / device).
+// Set to false before shipping to hide debug.
+var SHOW_STORY_API_LOG_IN_LENS = true;
 
 var userPrompt = "";
 var gamePhase = "prompt";
@@ -39,9 +54,74 @@ var adventureGraph = null;
 var currentNodeId = null;
 var pendingSelection = null;
 
+var STORY_API_DEBUG_MAX_LINES = 10;
+
 /** Verbose API / network logging (Logger panel). */
 function logFetch(msg) {
     print("[LensController.fetch] " + msg);
+}
+
+function clearStoryApiDebugOverlay() {
+    storyApiDebugLines = [];
+    if (script.storyApiDebugText) {
+        script.storyApiDebugText.text = "";
+    }
+}
+
+var storyApiDebugLines = [];
+
+function refreshStoryApiDebugUi() {
+    var body = storyApiDebugLines.join("\n");
+    if (script.storyApiDebugText) {
+        script.storyApiDebugText.text = body;
+        var dbgSo = script.storyApiDebugText.getSceneObject();
+        if (dbgSo) {
+            dbgSo.enabled = true;
+        }
+        return;
+    }
+    if (script.storyText && gamePhase === "generating") {
+        script.storyText.text =
+            "Generating your branching story…\n\n— API —\n" + body;
+        var storySo = script.storyText.getSceneObject();
+        if (storySo) {
+            storySo.enabled = true;
+        }
+    }
+}
+
+function pushStoryApiDebugOverlay(line) {
+    var s = String(line).slice(0, 220);
+    storyApiDebugLines.push(s);
+    while (storyApiDebugLines.length > STORY_API_DEBUG_MAX_LINES) {
+        storyApiDebugLines.shift();
+    }
+    refreshStoryApiDebugUi();
+}
+
+/** Append cached API lines to story body when SHOW_STORY_API_LOG_IN_LENS (in-filter debug). */
+function appendApiLogToLensStoryBody(body) {
+    if (!SHOW_STORY_API_LOG_IN_LENS || !storyApiDebugLines.length) {
+        return body;
+    }
+    return body + "\n\n— API —\n" + storyApiDebugLines.join("\n");
+}
+
+/** Hard-to-miss lines in Lens Studio / device Logger when story HTTP runs or is skipped. */
+function logStoryApiLoud(title, detail) {
+    print("");
+    print(" >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> ");
+    print(" >> STORY API — " + title);
+    if (detail !== undefined && detail !== null && detail !== "") {
+        print(" >> " + String(detail));
+    }
+    print(" >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> ");
+    print("");
+    var one = "• " + title;
+    if (detail !== undefined && detail !== null && detail !== "") {
+        one += " — " + String(detail).slice(0, 180);
+    }
+    pushStoryApiDebugOverlay(one);
 }
 
 function logFetchDeviceInfo() {
@@ -381,6 +461,120 @@ function buildFallbackAdventureGraph(prompt) {
     return { startId: "n0", nodes: nodes };
 }
 
+/** Normalized graph or null → onDone. */
+function applyStoryGraphResponse(json, onDone) {
+    if (!json) {
+        logFetch("pipeline: no json — onDone(null)");
+        logStoryApiLoud("PIPELINE END — NO JSON", "Using offline fallback graph.");
+        onDone(null);
+        return;
+    }
+    if (json.error) {
+        logFetch("json.error: " + JSON.stringify(json.error));
+        print("LensController: API error field " + JSON.stringify(json.error));
+    }
+    var wrapped = json.graph ? json.graph : json;
+    logFetch("using " + (json.graph ? "json.graph" : "top-level json") + " as graph source");
+    var g = normalizeGraph(wrapped);
+    if (!g) {
+        logFetch("normalizeGraph returned null");
+        logStoryApiLoud("PARSE OK BUT GRAPH INVALID", "normalizeGraph returned null — using offline fallback.");
+        print("LensController: response missing valid graph shape");
+    } else {
+        var nk = 0;
+        for (var kid in g.nodes) {
+            if (g.nodes.hasOwnProperty(kid)) {
+                nk++;
+            }
+        }
+        logFetch("normalizeGraph OK startId=" + g.startId + " nodeCount=" + nk);
+        logStoryApiLoud("GRAPH READY — USING API STORY", "startId=" + g.startId + " nodes=" + nk);
+    }
+    logFetch("--- end (success path to onDone) ---");
+    onDone(g);
+}
+
+/** True if callable (own or bracket — some builds differ). */
+function isFn(obj, key) {
+    if (!obj) {
+        return false;
+    }
+    var f = obj[key];
+    return typeof f === "function";
+}
+
+/** Some runtimes expose fetch globally even when InternetModule has no methods. */
+function getGlobalFetchIfAny() {
+    try {
+        if (typeof fetch === "function") {
+            return fetch;
+        }
+    } catch (e1) {}
+    try {
+        if (typeof global !== "undefined" && typeof global.fetch === "function") {
+            return global.fetch;
+        }
+    } catch (e2) {}
+    return null;
+}
+
+/**
+ * Picks Internet Module or Remote Service Module if they expose HTTP.
+ * If not, falls back to global fetch when available (rare but helps some builds).
+ */
+function pickHttpModule() {
+    var im = script.internetModule;
+    var rm = script.remoteServiceModule;
+    var hasFetchIm = isFn(im, "fetch");
+    var hasPerfIm = isFn(im, "performHttpRequest");
+    var hasFetchRm = isFn(rm, "fetch");
+    var hasPerfRm = isFn(rm, "performHttpRequest");
+    if (hasFetchIm || hasPerfIm) {
+        return { m: im, hasFetch: hasFetchIm, hasPerform: hasPerfIm, globalFetch: null };
+    }
+    if (hasFetchRm || hasPerfRm) {
+        return { m: rm, hasFetch: hasFetchRm, hasPerform: hasPerfRm, globalFetch: null };
+    }
+    var gf = getGlobalFetchIfAny();
+    if (gf) {
+        logFetch("pickHttpModule: using global fetch (InternetModule had no HTTP methods)");
+        return { m: im, hasFetch: true, hasPerform: false, globalFetch: gf };
+    }
+    logFetch(
+        "pickHttpModule: no HTTP — im=" +
+            (im ? "assigned" : "null") +
+            " typeof im.fetch=" +
+            (im ? typeof im.fetch : "n/a") +
+            " typeof im.performHttpRequest=" +
+            (im ? typeof im.performHttpRequest : "n/a") +
+            " rm=" +
+            (rm ? "assigned" : "null") +
+            " typeof fetch=" +
+            (typeof fetch === "undefined" ? "undefined" : typeof fetch)
+    );
+    return null;
+}
+
+function parseJsonTextToStoryGraph(text, httpStatus, onDone) {
+    logFetch("response body length=" + String(text).length);
+    logFetch("response body (raw): " + text);
+    if (httpStatus !== 200) {
+        logFetch("non-200 — skipping JSON parse");
+        logStoryApiLoud("HTTP NON-OK — NO GRAPH", "status=" + httpStatus + " body preview: " + String(text).slice(0, 120));
+        applyStoryGraphResponse(null, onDone);
+        return;
+    }
+    try {
+        var parsed = JSON.parse(text);
+        logFetch("JSON.parse OK keys=" + (parsed && typeof parsed === "object" ? Object.keys(parsed).join(",") : "(n/a)"));
+        applyStoryGraphResponse(parsed, onDone);
+    } catch (parseErr) {
+        logFetch("JSON.parse FAILED: " + parseErr);
+        print("LensController: JSON parse failed " + parseErr);
+        applyStoryGraphResponse(null, onDone);
+    }
+}
+
 function fetchStoryGraphFromApi(prompt, onDone) {
     logFetch("--- start ---");
     var url = script.storyGraphApiUrl ? script.storyGraphApiUrl.trim() : "";
@@ -392,14 +586,10 @@ function fetchStoryGraphFromApi(prompt, onDone) {
     logFetch("Inspector storyGraphApiUrl raw: " + (script.storyGraphApiUrl ? script.storyGraphApiUrl : "(empty)"));
     logFetch("prompt length=" + String(prompt).length + " text=" + JSON.stringify(String(prompt).slice(0, 500)));
 
-    if (!script.internetModule || url.length === 0) {
-        if (!script.internetModule) {
-            logFetch("ABORT: Internet Module not assigned");
-            print("LensController: Internet Module not assigned — assign Assets/Internet Module in Inspector (LensController).");
-        } else if (url.length === 0) {
-            logFetch("ABORT: no URL");
-            print("LensController: storyGraphApiUrl empty — set Inspector URL or STORY_GRAPH_API_URL_FALLBACK.");
-        }
+    if (url.length === 0) {
+        logFetch("ABORT: no URL");
+        logStoryApiLoud("NO HTTP REQUEST", "storyGraphApiUrl is empty — set Inspector or STORY_GRAPH_API_URL_FALLBACK.");
+        print("LensController: storyGraphApiUrl empty — set Inspector URL or STORY_GRAPH_API_URL_FALLBACK.");
         onDone(null);
         return;
     }
@@ -409,6 +599,10 @@ function fetchStoryGraphFromApi(prompt, onDone) {
     try {
         if (typeof global !== "undefined" && global.deviceInfoSystem && global.deviceInfoSystem.isEditor()) {
             logFetch("ABORT: isEditor() — no fetch in Lens Studio preview");
+            logStoryApiLoud(
+                "NO HTTP REQUEST (preview)",
+                "isEditor() — open in Snapchat on a device for live API; using offline story."
+            );
             print(
                 "LensController: Lens Studio preview has no Internet fetch — open this lens in Snapchat on a phone for live AI; using offline story."
             );
@@ -421,104 +615,127 @@ function fetchStoryGraphFromApi(prompt, onDone) {
 
     var requestBody = JSON.stringify({ prompt: prompt });
     logFetch("request POST body: " + requestBody);
-    logFetch("calling internetModule.fetch …");
+    logStoryApiLoud("RUNNING HTTP POST /generate", "URL: " + url);
+    logStoryApiLoud("REQUEST BODY (prompt)", String(prompt).slice(0, 200) + (String(prompt).length > 200 ? "…" : ""));
 
-    try {
-        // Lens runtime has no global Request — use fetch(url, options) per InternetModule API.
-        script.internetModule
-            .fetch(url, {
+    var picked = pickHttpModule();
+    if (!picked) {
+        logFetch("ABORT: no module exposes fetch or performHttpRequest");
+        logStoryApiLoud(
+            "NO HTTP API",
+            "This Snapchat build has no fetch/HTTP on Internet Module. Enable Camera Kit in Project Info, rebuild, test in Camera Kit / Spectacles. Offline story works."
+        );
+        print(
+            "LensController: assign Internet Module or Remote Service Module; enable Camera Kit for open HTTP. See Lens HTTP docs."
+        );
+        onDone(null);
+        return;
+    }
+    var im = picked.m;
+    var hasFetch = picked.hasFetch;
+    var hasPerformHttp = picked.hasPerform;
+    var globalFetchFn = picked.globalFetch;
+
+    if (hasFetch) {
+        logFetch(globalFetchFn ? "using global fetch (POST) …" : "using module.fetch (POST) …");
+        try {
+            var fetchCall = globalFetchFn
+                ? globalFetchFn
+                : function (u, opts) {
+                      return im.fetch(u, opts);
+                  };
+            fetchCall(url, {
                 method: "POST",
                 body: requestBody,
                 headers: { "Content-Type": "application/json" }
-            })
-            .then(function (resp) {
-                logFetch("fetch promise resolved");
-                if (!resp) {
-                    logFetch("response object is null/undefined");
-                    print("LensController: API no response");
-                    return Promise.resolve(null);
-                }
-                var status = resp.status;
-                var st = resp.statusText !== undefined ? resp.statusText : "";
-                var ok = resp.ok !== undefined ? resp.ok : false;
-                var respUrl = resp.url !== undefined ? resp.url : "";
-                logFetch("response status=" + status + " statusText=" + st + " ok=" + ok + " url=" + respUrl);
-                try {
-                    if (resp.headers) {
-                        var ct = resp.headers.get("content-type");
-                        var cl = resp.headers.get("content-length");
-                        logFetch("response headers content-type=" + ct + " content-length=" + cl);
+            }).then(function (resp) {
+                    logFetch("fetch promise resolved");
+                    if (!resp) {
+                        logFetch("response object is null/undefined");
+                        logStoryApiLoud("HTTP RESPONSE ERROR", "Response object was null.");
+                        print("LensController: API no response");
+                        applyStoryGraphResponse(null, onDone);
+                        return;
                     }
-                } catch (hErr) {
-                    logFetch("response headers (could not read): " + hErr);
-                }
-
-                return resp.text().then(function (text) {
-                    logFetch("response body length=" + String(text).length);
-                    logFetch("response body (raw): " + text);
-                    if (status !== 200) {
-                        logFetch("non-200 — skipping JSON parse");
-                        return null;
-                    }
+                    var status = resp.status;
+                    var st = resp.statusText !== undefined ? resp.statusText : "";
+                    var ok = resp.ok !== undefined ? resp.ok : false;
+                    var respUrl = resp.url !== undefined ? resp.url : "";
+                    logFetch("response status=" + status + " statusText=" + st + " ok=" + ok + " url=" + respUrl);
+                    logStoryApiLoud("HTTP RESPONSE RECEIVED", "status=" + status + " ok=" + ok);
                     try {
-                        var parsed = JSON.parse(text);
-                        logFetch("JSON.parse OK keys=" + (parsed && typeof parsed === "object" ? Object.keys(parsed).join(",") : "(n/a)"));
-                        return parsed;
-                    } catch (parseErr) {
-                        logFetch("JSON.parse FAILED: " + parseErr);
-                        print("LensController: JSON parse failed " + parseErr);
-                        return null;
-                    }
-                });
-            })
-            .then(function (json) {
-                if (!json) {
-                    logFetch("pipeline: no json — onDone(null)");
-                    onDone(null);
-                    return;
-                }
-                if (json.error) {
-                    logFetch("json.error: " + JSON.stringify(json.error));
-                    print("LensController: API error field " + JSON.stringify(json.error));
-                }
-                var wrapped = json.graph ? json.graph : json;
-                logFetch("using " + (json.graph ? "json.graph" : "top-level json") + " as graph source");
-                var g = normalizeGraph(wrapped);
-                if (!g) {
-                    logFetch("normalizeGraph returned null");
-                    print("LensController: response missing valid graph shape");
-                } else {
-                    var nk = 0;
-                    for (var kid in g.nodes) {
-                        if (g.nodes.hasOwnProperty(kid)) {
-                            nk++;
+                        if (resp.headers) {
+                            var ct = resp.headers.get("content-type");
+                            var cl = resp.headers.get("content-length");
+                            logFetch("response headers content-type=" + ct + " content-length=" + cl);
                         }
+                    } catch (hErr) {
+                        logFetch("response headers (could not read): " + hErr);
                     }
-                    logFetch("normalizeGraph OK startId=" + g.startId + " nodeCount=" + nk);
-                }
-                logFetch("--- end (success path to onDone) ---");
-                onDone(g);
-            })
-            .catch(function (e) {
-                logFetch("fetch chain REJECTED: " + e);
-                print("LensController: fetch failed " + e);
-                onDone(null);
-            });
-    } catch (err) {
-        var errMsg = String(err && err.message !== undefined ? err.message : err);
-        logFetch("fetch THREW (sync): " + err);
-        if (
-            errMsg.indexOf("not available") !== -1 ||
-            errMsg.indexOf("simulated") !== -1 ||
-            errMsg.indexOf("simulator") !== -1
-        ) {
-            logFetch("treated as simulated / unavailable environment");
-            print(
-                "LensController: Internet fetch unavailable in this environment — use Snapchat on a device for live AI; using offline story."
-            );
-        } else {
-            print("LensController: fetch setup failed " + err);
+
+                    return resp.text().then(function (text) {
+                        parseJsonTextToStoryGraph(text, status, onDone);
+                    });
+                })
+                .catch(function (e) {
+                    logFetch("fetch chain REJECTED: " + e);
+                    logStoryApiLoud("FETCH REJECTED / NETWORK ERROR", String(e));
+                    print("LensController: fetch failed " + e);
+                    onDone(null);
+                });
+        } catch (err) {
+            var errMsg = String(err && err.message !== undefined ? err.message : err);
+            logFetch("fetch THREW (sync): " + err);
+            if (
+                errMsg.indexOf("not available") !== -1 ||
+                errMsg.indexOf("simulated") !== -1 ||
+                errMsg.indexOf("simulator") !== -1
+            ) {
+                logFetch("treated as simulated / unavailable environment");
+                logStoryApiLoud("FETCH UNAVAILABLE (simulator)", errMsg);
+                print(
+                    "LensController: Internet fetch unavailable in this environment — use Snapchat on a device for live AI; using offline story."
+                );
+            } else {
+                logStoryApiLoud("FETCH SETUP FAILED", errMsg);
+                print("LensController: fetch setup failed " + err);
+            }
+            onDone(null);
         }
+        return;
+    }
+
+    logFetch("using module.performHttpRequest (POST) — fetch() not available on this platform …");
+    try {
+        if (typeof RemoteServiceHttpRequest === "undefined" || !RemoteServiceHttpRequest.create) {
+            logStoryApiLoud("HTTP FAILED", "RemoteServiceHttpRequest missing — cannot POST.");
+            onDone(null);
+            return;
+        }
+        var httpReq = RemoteServiceHttpRequest.create();
+        httpReq.url = url;
+        var httpMethod = RemoteServiceHttpRequest.HttpRequestMethod;
+        httpReq.method = httpMethod && httpMethod.Post !== undefined ? httpMethod.Post : 1;
+        httpReq.body = requestBody;
+        httpReq.contentType = "application/json";
+
+        im.performHttpRequest(httpReq, function (resp) {
+            if (!resp) {
+                logFetch("performHttpRequest: null response");
+                logStoryApiLoud("HTTP RESPONSE ERROR", "performHttpRequest returned null.");
+                applyStoryGraphResponse(null, onDone);
+                return;
+            }
+            var status = resp.statusCode;
+            logFetch("performHttpRequest statusCode=" + status + " bodyLen=" + String(resp.body || "").length);
+            logStoryApiLoud("HTTP RESPONSE RECEIVED", "status=" + status + " ok=" + (status === 200));
+            parseJsonTextToStoryGraph(resp.body || "", status, onDone);
+        });
+    } catch (err2) {
+        var errMsg2 = String(err2 && err2.message !== undefined ? err2.message : err2);
+        logFetch("performHttpRequest THREW: " + err2);
+        logStoryApiLoud("HTTP REQUEST FAILED", errMsg2);
+        print("LensController: performHttpRequest failed " + err2);
         onDone(null);
     }
 }
@@ -538,7 +755,7 @@ function renderCurrentNode() {
     }
     var node = adventureGraph.nodes[currentNodeId];
     if (!node) {
-        setStoryMessage("Story error: missing node.");
+        setStoryMessage(appendApiLogToLensStoryBody("Story error: missing node."));
         return;
     }
     var body = node.narrative || "";
@@ -550,7 +767,7 @@ function renderCurrentNode() {
     } else {
         body += "\nTilt Play again · center to restart.";
     }
-    setStoryMessage(body);
+    setStoryMessage(appendApiLogToLensStoryBody(body));
     if (isTerminalNode(node)) {
         gamePhase = "ended";
         setBlockLabel(script.leftPopupText, node.leftLabel || "Play again");
@@ -605,9 +822,14 @@ function startGenerationFromPrompt() {
     setPromptMode(false);
     setStoryMessage("Generating your branching story…");
     styleOptionsUnselected();
+    clearStoryApiDebugOverlay();
+    logStoryApiLoud("USER SUBMIT — STORY GENERATION START", "prompt: " + String(userPrompt).slice(0, 300));
     fetchStoryGraphFromApi(userPrompt, function (g) {
         var use = g && validateGraph(g) ? g : buildFallbackAdventureGraph(userPrompt);
-        if (g && !validateGraph(g)) {
+        if (!g) {
+            logStoryApiLoud("PLAYING OFFLINE STORY", "API returned no graph (see STORY API messages above).");
+        } else if (!validateGraph(g)) {
+            logStoryApiLoud("API GRAPH FAILED VALIDATION", "Using offline fallback — check validateGraph / server shape.");
             print("LensController: API graph invalid, using offline graph.");
         }
         beginAdventureWithGraph(use);
@@ -638,6 +860,10 @@ initPrompt();
 
 script.createEvent("OnStartEvent").bind(function () {
     styleOptionsUnselected();
+    if (script.storyApiDebugText) {
+        script.storyApiDebugText.text =
+            "API debug: submit a prompt. Preview=no net. Snapchat=live.";
+    }
 });
 
 try {

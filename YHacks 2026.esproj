@@ -26,6 +26,7 @@ metaInfo:
   lensClientCompatibilities:
     - Mobile
     - Web
+    - CameraKit
   platformBundlesEnabled: false
   iconHash: 4ca48e21c1d47f8b1d36ceda698d4abf
   videoPreviewHash: ""

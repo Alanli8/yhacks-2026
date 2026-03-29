@@ -723,7 +723,9 @@
   ScriptAsset: !<reference> 2c38aaef-dfe7-47a4-b572-e27062611c30
   ScriptInputsDefault:
     internetModule: true
+    remoteServiceModule: true
     storyGraphApiUrl: true
+    storyApiDebugText: true
   ScriptTypesDefault:
     {}
   ScriptInputs:
@@ -734,7 +736,9 @@
       promptInputText: !<reference.Text> f4cc73aa-8e53-4689-a1d5-4d6f3d3ea9f7
       storyText: !<reference.Text> 74c1ea50-2e65-4112-8344-c09fa056ed21
       internetModule: !<reference.InternetModule> f0ace294-40e4-4ff2-bab1-e464d7f6c39e
+      remoteServiceModule: !<reference.RemoteServiceModule> 00000000-0000-0000-0000-000000000000
       storyGraphApiUrl: "https://yhacks-story-api.onrender.com/generate"
+      storyApiDebugText: !<reference.Text> 00000000-0000-0000-0000-000000000000
   ScriptTypes:
     "":
       {}
