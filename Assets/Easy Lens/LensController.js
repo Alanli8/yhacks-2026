@@ -1,4 +1,25 @@
 // Adventure controller: prompt → story graph → head-tilt choices (center to confirm).
+// Only attach this script ONCE (e.g. Main Controller). Duplicate LensController components on other
+// objects will double-bind inputs, fight over the same Image, and break backgrounds.
+//
+// --- Lens Studio: required wiring for backgrounds (Inspector on this script) ---
+// 1) internetModule     — Add Asset > Internet Module to the project; drag it here (needed for HTTP fetch).
+// 2) remoteMediaModule  — Add Asset > Remote Media Module; drag it here (needed to turn image URLs into textures).
+// 3) backgroundImage    — Screen-space Image (full-screen): Objects > Screen Image, stretch to safe area;
+//    assign its Image component here. Without this, textures load but nothing on screen shows them.
+// 4) storyGraphApiUrl   — e.g. https://YOUR-NGROK/generate OR http://127.0.0.1:8787/generate
+//    Prefetch URL is derived by swapping /generate → /prefetch-styles, OR set stylePrefetchApiUrl explicitly
+//    to http://127.0.0.1:8787/prefetch-styles. You can also set STYLE_PREFETCH_API_URL_FALLBACK in this file.
+// 5) Preview: Window > Logger — watch for "LensController [style]:" lines if backgrounds stay blank.
+//
+// Text: storyText + promptInputText + left/right popup scripts are separate @inputs (Easy Lens blocks).
+// Props: add SceneObjects under the camera; show/hide or swap materials from script by @input references.
+//
+// Styling workflow (runtime):
+// - Server returns each node with optional stylePrompt; POST /prefetch-styles resolves HTTPS image URLs
+//   (placeholder: picsum; production: Midjourney → CDN, or STYLE_IMAGE_RESOLVER_URL on the server).
+// - After each scene render, we prefetch textures for [currentNode, leftChild, rightChild] so the next
+//   step is already styled whichever branch the user picks.
 //
 // Graph JSON (from your server OR offline fallback):
 // {
@@ -20,7 +41,8 @@
 // Story API: run the Node proxy in /server (LAVA_SECRET_KEY, npm start — Gemini via Lava gateway).
 // Set storyGraphApiUrl to https://<your-host>/generate — POST { "prompt": "..." }, response { "graph": { startId, nodes } }.
 // Use HTTPS + a tunnel (e.g. ngrok) when testing on device. Never put Lava or provider keys inside the lens.
-// InternetModule availability depends on target; offline fallback runs if fetch is unavailable or fails.
+// InternetModule.fetch is NOT available in Lens Studio's simulated preview — use styleSimulatorPlaceholder
+// (a Texture asset, e.g. solid pink PNG) for backgrounds in-editor; use a real device + server for HTTP images.
 
 //@input Component.ScriptComponent faceEvents
 //@input Component.ScriptComponent leftPopupText
@@ -29,15 +51,307 @@
 //@input Component.Text storyText
 //@input Asset.InternetModule internetModule
 //@input string storyGraphApiUrl
+// Optional: full URL for POST /prefetch-styles (defaults: same host as storyGraphApiUrl with /generate → /prefetch-styles).
+//@input string stylePrefetchApiUrl
+// Optional: full-screen background Image; requires internetModule + remoteMediaModule for URL textures.
+//@input Asset.RemoteMediaModule remoteMediaModule
+//@input Component.Image backgroundImage
+// Editor/simulator: assign a Texture (e.g. pink PNG) — used when fetch is unavailable or fails (no network in preview).
+//@input Component.Texture styleSimulatorPlaceholder
 
 // If Inspector "story Graph Api Url" is empty, this is used (e.g. paste your HTTPS deploy URL + /generate).
 var STORY_GRAPH_API_URL_FALLBACK = "";
+
+/** If stylePrefetchApiUrl is empty and storyGraphApiUrl cannot derive /prefetch-styles, use this (local server). */
+var STYLE_PREFETCH_API_URL_FALLBACK = "";
+// Example for editor-only testing: var STYLE_PREFETCH_API_URL_FALLBACK = "http://127.0.0.1:8787/prefetch-styles";
+
+var stylePipelineDiagLogged = false;
+var warnedBackgroundImageMissing = false;
 
 var userPrompt = "";
 var gamePhase = "prompt";
 var adventureGraph = null;
 var currentNodeId = null;
 var pendingSelection = null;
+/** nodeId -> Texture; preemptive loads for current + both children */
+var styleTextureCache = {};
+
+function getStylePrefetchApiUrl() {
+    var u = script.stylePrefetchApiUrl ? script.stylePrefetchApiUrl.trim() : "";
+    if (u.length > 0) {
+        return u;
+    }
+    var g = script.storyGraphApiUrl ? script.storyGraphApiUrl.trim() : "";
+    if (g.length > 0 && g.indexOf("/generate") >= 0) {
+        return g.replace("/generate", "/prefetch-styles");
+    }
+    if (STORY_GRAPH_API_URL_FALLBACK && String(STORY_GRAPH_API_URL_FALLBACK).indexOf("/generate") >= 0) {
+        return String(STORY_GRAPH_API_URL_FALLBACK).trim().replace("/generate", "/prefetch-styles");
+    }
+    if (STYLE_PREFETCH_API_URL_FALLBACK && String(STYLE_PREFETCH_API_URL_FALLBACK).trim()) {
+        return String(STYLE_PREFETCH_API_URL_FALLBACK).trim();
+    }
+    return "";
+}
+
+function logStylePipelineDiagnostics() {
+    if (stylePipelineDiagLogged) {
+        return;
+    }
+    stylePipelineDiagLogged = true;
+    var issues = [];
+    if (!script.backgroundImage) {
+        issues.push("backgroundImage not assigned (full-screen Screen Image → LensController)");
+    }
+    if (!script.styleSimulatorPlaceholder) {
+        if (!script.internetModule) {
+            issues.push("internetModule not assigned (needed for remote images)");
+        }
+        if (!script.remoteMediaModule) {
+            issues.push("remoteMediaModule not assigned (needed for remote images)");
+        }
+        var purl = getStylePrefetchApiUrl();
+        if (!purl || purl.length === 0) {
+            issues.push(
+                "no prefetch URL — set storyGraphApiUrl …/generate or stylePrefetchApiUrl …/prefetch-styles"
+            );
+        }
+    }
+    if (issues.length > 0) {
+        print(
+            "LensController [style]: " +
+                issues.join(" | ") +
+                " — or assign styleSimulatorPlaceholder (bundled pink/local texture) to skip remote requirements."
+        );
+    } else if (script.styleSimulatorPlaceholder) {
+        print(
+            "LensController [style]: OK — bundled placeholder assigned; remote URLs optional for live MidAPI/images."
+        );
+    } else {
+        print("LensController [style]: OK — remote prefetch " + getStylePrefetchApiUrl());
+    }
+}
+
+function clearStyleTextureCache() {
+    styleTextureCache = {};
+}
+
+function applyTextureToBackground(tex) {
+    if (!tex) {
+        return;
+    }
+    if (!script.backgroundImage) {
+        if (!warnedBackgroundImageMissing) {
+            warnedBackgroundImageMissing = true;
+            print(
+                "LensController [style]: Texture ready but backgroundImage not assigned — assign a Screen Image in Inspector."
+            );
+        }
+        return;
+    }
+    script.backgroundImage.mainPass.baseTex = tex;
+}
+
+/** Bundled Texture (e.g. pink PNG) — no HTTP. Used on first paint, when modules/URL missing, or when remote load fails. */
+function applyBundledPlaceholderTexture() {
+    if (!script.backgroundImage || !script.styleSimulatorPlaceholder) {
+        return;
+    }
+    try {
+        script.backgroundImage.mainPass.baseTex = script.styleSimulatorPlaceholder;
+    } catch (err) {
+        print("LensController [style]: bundled placeholder failed " + err);
+    }
+}
+
+function cacheBundledPlaceholderForNode(nodeId) {
+    if (!nodeId || !script.styleSimulatorPlaceholder) {
+        return;
+    }
+    styleTextureCache[nodeId] = script.styleSimulatorPlaceholder;
+}
+
+/** True if we have a real remote-loaded texture for this node (not the bundled placeholder). */
+function hasRemoteTextureForNode(nodeId) {
+    var t = styleTextureCache[nodeId];
+    if (!t) {
+        return false;
+    }
+    if (script.styleSimulatorPlaceholder && t === script.styleSimulatorPlaceholder) {
+        return false;
+    }
+    return true;
+}
+
+function loadStyleTextureForNode(nodeId, url) {
+    if (!nodeId || !url) {
+        return;
+    }
+    if (!script.internetModule || !script.remoteMediaModule) {
+        cacheBundledPlaceholderForNode(nodeId);
+        if (nodeId === currentNodeId) {
+            applyBundledPlaceholderTexture();
+        }
+        return;
+    }
+    try {
+        var dr = script.internetModule.makeResourceFromUrl(url);
+        script.remoteMediaModule.loadResourceAsImageTexture(
+            dr,
+            function (tex) {
+                styleTextureCache[nodeId] = tex;
+                if (nodeId === currentNodeId) {
+                    applyTextureToBackground(tex);
+                }
+            },
+            function (err) {
+                print("LensController: style texture " + nodeId + " " + err + " — using bundled placeholder");
+                cacheBundledPlaceholderForNode(nodeId);
+                if (nodeId === currentNodeId) {
+                    applyBundledPlaceholderTexture();
+                }
+            }
+        );
+    } catch (err) {
+        print("LensController: makeResourceFromUrl " + err + " — using bundled placeholder");
+        cacheBundledPlaceholderForNode(nodeId);
+        if (nodeId === currentNodeId) {
+            applyBundledPlaceholderTexture();
+        }
+    }
+}
+
+function fetchPrefetchStyleAssets(nodeIds, onDone) {
+    var url = getStylePrefetchApiUrl();
+    if (!script.internetModule || url.length === 0 || !adventureGraph || !nodeIds || nodeIds.length === 0) {
+        if (onDone) {
+            onDone(null);
+        }
+        return;
+    }
+    try {
+        // Lens runtime has no global Request(); pass URL string + options (StudioLib InternetModule.fetch).
+        script.internetModule
+            .fetch(url, {
+                method: "POST",
+                body: JSON.stringify({ graph: adventureGraph, nodeIds: nodeIds }),
+                headers: { "Content-Type": "application/json" }
+            })
+            .then(function (resp) {
+                if (!resp || resp.status !== 200) {
+                    print("LensController: prefetch-styles status " + (resp ? resp.status : "none"));
+                    return null;
+                }
+                return resp.json();
+            })
+            .then(function (json) {
+                if (!json || !json.assets) {
+                    if (onDone) {
+                        onDone(null);
+                    }
+                    return;
+                }
+                if (onDone) {
+                    onDone(json.assets);
+                }
+            })
+            .catch(function (e) {
+                print("LensController: prefetch-styles failed " + e);
+                if (onDone) {
+                    onDone(null);
+                }
+            });
+    } catch (err) {
+        print("LensController: prefetch-styles setup " + err);
+        if (onDone) {
+            onDone(null);
+        }
+    }
+}
+
+function prefetchStylesForCurrentAndChildren() {
+    if (!adventureGraph || !currentNodeId) {
+        return;
+    }
+    if (gamePhase !== "play" && gamePhase !== "ended") {
+        return;
+    }
+    if (!script.backgroundImage) {
+        return;
+    }
+    var node = adventureGraph.nodes[currentNodeId];
+    if (!node) {
+        return;
+    }
+
+    var ids = [currentNodeId];
+    if (!isTerminalNode(node)) {
+        if (node.leftNext) {
+            ids.push(node.leftNext);
+        }
+        if (node.rightNext) {
+            ids.push(node.rightNext);
+        }
+    }
+
+    var prefetchUrl = getStylePrefetchApiUrl();
+    var canLoadRemote =
+        !!script.internetModule && !!script.remoteMediaModule && prefetchUrl.length > 0;
+
+    if (script.styleSimulatorPlaceholder) {
+        applyBundledPlaceholderTexture();
+    }
+
+    var idsNeedingRemote = [];
+    var j;
+    for (j = 0; j < ids.length; j++) {
+        if (!hasRemoteTextureForNode(ids[j])) {
+            idsNeedingRemote.push(ids[j]);
+        }
+    }
+
+    if (!canLoadRemote) {
+        for (j = 0; j < idsNeedingRemote.length; j++) {
+            cacheBundledPlaceholderForNode(idsNeedingRemote[j]);
+        }
+        if (hasRemoteTextureForNode(currentNodeId)) {
+            applyTextureToBackground(styleTextureCache[currentNodeId]);
+        } else if (script.styleSimulatorPlaceholder) {
+            applyBundledPlaceholderTexture();
+        }
+        return;
+    }
+
+    if (idsNeedingRemote.length === 0) {
+        if (hasRemoteTextureForNode(currentNodeId)) {
+            applyTextureToBackground(styleTextureCache[currentNodeId]);
+        } else if (script.styleSimulatorPlaceholder) {
+            applyBundledPlaceholderTexture();
+        }
+        return;
+    }
+
+    fetchPrefetchStyleAssets(idsNeedingRemote, function (assets) {
+        if (!assets) {
+            var k;
+            for (k = 0; k < idsNeedingRemote.length; k++) {
+                cacheBundledPlaceholderForNode(idsNeedingRemote[k]);
+            }
+            applyBundledPlaceholderTexture();
+            return;
+        }
+        for (var nid in assets) {
+            if (!assets.hasOwnProperty(nid)) {
+                continue;
+            }
+            var entry = assets[nid];
+            if (entry && entry.url) {
+                loadStyleTextureForNode(nid, entry.url);
+            }
+        }
+    });
+}
 
 function getBlockText(blockScript) {
     if (!blockScript) {
@@ -148,7 +462,8 @@ function normalizeGraph(raw) {
             rightLabel: n.rightLabel || n.rightOption || n.right || "B",
             leftNext: leftN != null && leftN !== "" ? String(leftN) : null,
             rightNext: rightN != null && rightN !== "" ? String(rightN) : null,
-            isEnding: !!n.isEnding
+            isEnding: !!n.isEnding,
+            stylePrompt: typeof n.stylePrompt === "string" ? n.stylePrompt : ""
         };
     }
     return out;
@@ -189,7 +504,8 @@ function buildFallbackAdventureGraph(prompt) {
         ? "The world assembles around you."
         : trimmed.substring(0, 96) + "\n\nThe world assembles around you.";
     var nodes = {};
-    function add(id, narrative, question, leftL, rightL, leftN, rightN, ending) {
+    function add(id, narrative, question, leftL, rightL, leftN, rightN, ending, stylePrompt) {
+        var sp = stylePrompt && stylePrompt.length > 0 ? stylePrompt : (narrative || "").slice(0, 120);
         nodes[id] = {
             id: id,
             narrative: narrative,
@@ -198,7 +514,8 @@ function buildFallbackAdventureGraph(prompt) {
             rightLabel: rightL,
             leftNext: leftN,
             rightNext: rightN,
-            isEnding: !!ending
+            isEnding: !!ending,
+            stylePrompt: sp || "atmospheric scene"
         };
     }
     add(
@@ -364,13 +681,12 @@ function fetchStoryGraphFromApi(prompt, onDone) {
         return;
     }
     try {
-        var req = new Request(url, {
-            method: "POST",
-            body: JSON.stringify({ prompt: prompt }),
-            headers: { "Content-Type": "application/json" }
-        });
         script.internetModule
-            .fetch(req)
+            .fetch(url, {
+                method: "POST",
+                body: JSON.stringify({ prompt: prompt }),
+                headers: { "Content-Type": "application/json" }
+            })
             .then(function (resp) {
                 if (!resp || resp.status !== 200) {
                     print("LensController: API status " + (resp ? resp.status : "none"));
@@ -397,11 +713,15 @@ function fetchStoryGraphFromApi(prompt, onDone) {
 }
 
 function beginAdventureWithGraph(g) {
+    clearStyleTextureCache();
+    stylePipelineDiagLogged = false;
+    warnedBackgroundImageMissing = false;
     adventureGraph = g;
     currentNodeId = g.startId;
     gamePhase = "play";
     pendingSelection = null;
     setPromptMode(false);
+    logStylePipelineDiagnostics();
     renderCurrentNode();
 }
 
@@ -435,6 +755,7 @@ function renderCurrentNode() {
     }
     pendingSelection = null;
     styleOptionsUnselected();
+    prefetchStylesForCurrentAndChildren();
 }
 
 function applyChoice(side) {
@@ -459,6 +780,7 @@ function applyChoice(side) {
 }
 
 function restartAdventure() {
+    clearStyleTextureCache();
     adventureGraph = null;
     currentNodeId = null;
     pendingSelection = null;
@@ -514,36 +836,42 @@ script.createEvent("OnStartEvent").bind(function () {
 });
 
 try {
-    script.faceEvents.onTiltLeft.add(function () {
-        if (gamePhase === "generating" || gamePhase === "prompt") {
-            return;
-        }
-        pendingSelection = "left";
-        applySelectedStyle(getBlockText(script.leftPopupText));
-        applyUnselectedStyle(getBlockText(script.rightPopupText));
-    });
+    if (!script.faceEvents) {
+        print(
+            "LensController: faceEvents not assigned — in Inspector, set Face Events to the Easy Lens Face Events script component (same prefab block as tilt controls)."
+        );
+    } else {
+        script.faceEvents.onTiltLeft.add(function () {
+            if (gamePhase === "generating" || gamePhase === "prompt") {
+                return;
+            }
+            pendingSelection = "left";
+            applySelectedStyle(getBlockText(script.leftPopupText));
+            applyUnselectedStyle(getBlockText(script.rightPopupText));
+        });
 
-    script.faceEvents.onTiltRight.add(function () {
-        if (gamePhase === "generating" || gamePhase === "prompt") {
-            return;
-        }
-        pendingSelection = "right";
-        applySelectedStyle(getBlockText(script.rightPopupText));
-        applyUnselectedStyle(getBlockText(script.leftPopupText));
-    });
+        script.faceEvents.onTiltRight.add(function () {
+            if (gamePhase === "generating" || gamePhase === "prompt") {
+                return;
+            }
+            pendingSelection = "right";
+            applySelectedStyle(getBlockText(script.rightPopupText));
+            applyUnselectedStyle(getBlockText(script.leftPopupText));
+        });
 
-    script.faceEvents.onTiltCenter.add(function () {
-        if (gamePhase === "generating" || gamePhase === "prompt") {
-            return;
-        }
-        if (pendingSelection === "left" || pendingSelection === "right") {
-            var side = pendingSelection;
-            pendingSelection = null;
-            applyChoice(side);
-        } else {
-            styleOptionsUnselected();
-        }
-    });
+        script.faceEvents.onTiltCenter.add(function () {
+            if (gamePhase === "generating" || gamePhase === "prompt") {
+                return;
+            }
+            if (pendingSelection === "left" || pendingSelection === "right") {
+                var side = pendingSelection;
+                pendingSelection = null;
+                applyChoice(side);
+            } else {
+                styleOptionsUnselected();
+            }
+        });
+    }
 } catch (e) {
     print("LensController: face event error");
     print(e);

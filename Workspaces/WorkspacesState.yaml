@@ -1,4 +1,3 @@
 order:
-  - Default
-  - GenAI
-current: Default
+  - Default 1
+current: Default 1

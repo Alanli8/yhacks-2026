@@ -1,11 +1,15 @@
 /**
  * Proxies adventure prompts to Google Gemini via Lava's AI Gateway and returns the story graph JSON the lens expects.
- * Run: LAVA_SECRET_KEY=aks_live_... npm start
+ * Run: LAVA_SECRET_KEY=... npm start
  * Docs: https://lava.so/docs/gateway/forward-proxy
  * Point Lens Studio "story Graph Api Url" to http://<host>:8787/generate (use ngrok/https for device builds).
+ *
+ * Scene images (/prefetch-styles): set MIDAPI_API_KEY (MidAPI.ai) or STYLE_IMAGE_RESOLVER_URL; else picsum placeholders.
+ * MidAPI docs: https://docs.midapi.ai/mj-api/quickstart
  */
 
 import "dotenv/config";
+import crypto from "node:crypto";
 import http from "node:http";
 import { URL } from "node:url";
 
@@ -18,6 +22,19 @@ const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
 const GEMINI_GENERATE_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 const LAVA_FORWARD_URL =
   "https://api.lava.so/v1/forward?u=" + encodeURIComponent(GEMINI_GENERATE_URL);
+
+/** MidAPI.ai — third-party Midjourney-compatible REST API (easiest turnkey). Docs: https://docs.midapi.ai/mj-api/quickstart */
+const MIDAPI_BASE = (process.env.MIDAPI_BASE_URL || "https://api.midapi.ai").replace(/\/$/, "");
+const MIDAPI_GENERATE_URL = `${MIDAPI_BASE}/api/v1/mj/generate`;
+
+/** Solid pink 9:16 PNG — used when STYLE_DEV_PLACEHOLDER=1 so no MidAPI/picsum calls during dev. */
+const STYLE_DEV_PINK_PLACEHOLDER_URL =
+  "https://dummyimage.com/1080x1920/ff69b4/ff69b4.png";
+
+function isStyleDevPlaceholderEnabled() {
+  const v = (process.env.STYLE_DEV_PLACEHOLDER || "").trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes";
+}
 
 const SYSTEM = `You are a narrative engine for a branching Snapchat lens. Output ONE JSON object only (no markdown).
 
@@ -32,10 +49,13 @@ Schema:
       "rightLabel": string,
       "leftNext": string | null,
       "rightNext": string | null,
-      "isEnding": optional boolean
+      "isEnding": optional boolean,
+      "stylePrompt": string
     }
   }
 }
+
+Each node MUST include "stylePrompt": a short English image prompt for that scene's background/environment (no characters' faces, lens-safe, vertical mood). Used to generate art; keep it concrete and visual under ~200 characters.
 
 Rules:
 - Non-ending nodes MUST have both leftNext and rightNext as non-null string ids pointing at existing nodes.
@@ -93,6 +113,7 @@ function normalizeGraph(raw) {
       leftNext: leftN != null && leftN !== "" ? String(leftN) : null,
       rightNext: rightN != null && rightN !== "" ? String(rightN) : null,
       isEnding: !!n.isEnding,
+      stylePrompt: typeof n.stylePrompt === "string" ? n.stylePrompt : "",
     };
   }
   return out;
@@ -117,6 +138,133 @@ function validateGraph(g) {
     }
   }
   return true;
+}
+
+/** Text used when stylePrompt is missing (deterministic fallback). */
+function effectiveStylePrompt(node, nodeId) {
+  const sp = (node.stylePrompt || "").trim();
+  if (sp) return sp;
+  return (node.narrative || nodeId || "scene").slice(0, 200);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * MidAPI.ai: submit mj_txt2img, poll record-info until successFlag === 1.
+ * @see https://docs.midapi.ai/mj-api/quickstart
+ */
+async function midapiTxt2ImgToImageUrl(stylePrompt) {
+  const key = (process.env.MIDAPI_API_KEY || "").trim();
+  if (!key) {
+    throw new Error("MIDAPI_API_KEY is not set");
+  }
+  const speed = (process.env.MIDAPI_SPEED || "relaxed").trim();
+  const version = String(process.env.MIDAPI_VERSION || "7").trim();
+  const aspectRatio = (process.env.MIDAPI_ASPECT_RATIO || "9:16").trim();
+  const pollMs = Math.max(2000, Number(process.env.MIDAPI_POLL_MS || 4000));
+  const maxPolls = Math.max(1, Number(process.env.MIDAPI_MAX_POLLS || 120));
+
+  const genRes = await fetch(MIDAPI_GENERATE_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${key}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      taskType: "mj_txt2img",
+      prompt: stylePrompt,
+      speed,
+      aspectRatio,
+      version,
+    }),
+  });
+  const genJson = await genRes.json().catch(() => ({}));
+  const genOk = genRes.ok && Number(genJson.code) === 200;
+  const taskId = genJson.data?.taskId;
+  if (!genOk || !taskId) {
+    const msg = genJson.msg || genJson.message || JSON.stringify(genJson) || genRes.statusText;
+    throw new Error(`MidAPI generate failed: ${msg}`);
+  }
+
+  const infoUrl = `${MIDAPI_BASE}/api/v1/mj/record-info?taskId=${encodeURIComponent(taskId)}`;
+
+  for (let i = 0; i < maxPolls; i++) {
+    if (i > 0) {
+      await sleep(pollMs);
+    }
+    const infoRes = await fetch(infoUrl, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${key}` },
+    });
+    const infoJson = await infoRes.json().catch(() => ({}));
+    if (!infoRes.ok || Number(infoJson.code) !== 200 || !infoJson.data) {
+      continue;
+    }
+    const td = infoJson.data;
+    const flag = td.successFlag;
+
+    if (flag === 1) {
+      const list = td.resultInfoJson?.resultUrls;
+      let first = null;
+      if (Array.isArray(list) && list.length) {
+        const item = list[0];
+        first = typeof item === "string" ? item : item?.resultUrl || item?.url;
+      }
+      if (typeof first === "string" && first.startsWith("https://")) {
+        return first;
+      }
+      throw new Error("MidAPI completed but no https resultUrl in resultInfoJson");
+    }
+    if (flag === 2 || flag === 3) {
+      const err = td.errorMessage || td.errorCode || `successFlag ${flag}`;
+      throw new Error(`MidAPI task failed: ${err}`);
+    }
+  }
+
+  throw new Error("MidAPI task timed out (increase MIDAPI_MAX_POLLS or MIDAPI_POLL_MS)");
+}
+
+/**
+ * Resolve a public HTTPS image URL for this node.
+ * Order: STYLE_DEV_PLACEHOLDER (pink, no APIs) → STYLE_IMAGE_RESOLVER_URL → MIDAPI_API_KEY → picsum.
+ */
+async function resolveStyleImageUrl(nodeId, node) {
+  const prompt = effectiveStylePrompt(node, nodeId);
+  if (isStyleDevPlaceholderEnabled()) {
+    console.log(
+      `[style] STYLE_DEV_PLACEHOLDER: pink image for "${nodeId}" (MidAPI/picsum skipped — production uses real generation)`
+    );
+    return { url: STYLE_DEV_PINK_PLACEHOLDER_URL, stylePrompt: prompt, devPlaceholder: true };
+  }
+  const custom = (process.env.STYLE_IMAGE_RESOLVER_URL || "").trim();
+  if (custom) {
+    const res = await fetch(custom, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ nodeId, stylePrompt: prompt }),
+    });
+    if (!res.ok) {
+      throw new Error(`STYLE_IMAGE_RESOLVER_URL failed: ${res.status}`);
+    }
+    const j = await res.json();
+    const url = j.url || j.imageUrl;
+    if (typeof url !== "string" || !url.startsWith("https://")) {
+      throw new Error("STYLE_IMAGE_RESOLVER_URL must return JSON { url } (https)");
+    }
+    return { url, stylePrompt: prompt };
+  }
+
+  const midapiKey = (process.env.MIDAPI_API_KEY || "").trim();
+  if (midapiKey) {
+    const url = await midapiTxt2ImgToImageUrl(prompt);
+    return { url, stylePrompt: prompt };
+  }
+
+  const seed = crypto.createHash("sha256").update(`${nodeId}\0${prompt}`, "utf8").digest("hex").slice(0, 40);
+  const url = `https://picsum.photos/seed/${seed}/1080/1920`;
+  return { url, stylePrompt: prompt };
 }
 
 /** Unwrap Lava { data } envelope if present; otherwise use provider JSON as-is. */
@@ -227,6 +375,41 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === "POST" && url.pathname === "/prefetch-styles") {
+    let raw = "";
+    try {
+      for await (const chunk of req) {
+        raw += chunk;
+      }
+      const body = raw ? JSON.parse(raw) : {};
+      const graph = body.graph && typeof body.graph === "object" ? body.graph : null;
+      const nodeIds = Array.isArray(body.nodeIds) ? body.nodeIds : [];
+      if (!graph || !graph.nodes || nodeIds.length === 0) {
+        sendJson(res, 400, { error: "Expected { graph, nodeIds: string[] }" });
+        return;
+      }
+      const ids = nodeIds.map((id) => String(id));
+      for (const sid of ids) {
+        if (!graph.nodes[sid]) {
+          sendJson(res, 400, { error: `Unknown node id: ${sid}` });
+          return;
+        }
+      }
+      const pairs = await Promise.all(
+        ids.map(async (sid) => {
+          const asset = await resolveStyleImageUrl(sid, graph.nodes[sid]);
+          return [sid, asset];
+        })
+      );
+      const assets = Object.fromEntries(pairs);
+      sendJson(res, 200, { assets });
+    } catch (e) {
+      console.error(e);
+      sendJson(res, 500, { error: formatErrorChain(e) });
+    }
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/generate") {
     let raw = "";
     try {
@@ -256,6 +439,13 @@ const server = http.createServer(async (req, res) => {
       ok: true,
       lava: configured,
       geminiModel: GEMINI_MODEL,
+      styleResolver: isStyleDevPlaceholderEnabled()
+        ? "dev-pink"
+        : (process.env.STYLE_IMAGE_RESOLVER_URL || "").trim()
+          ? "custom"
+          : (process.env.MIDAPI_API_KEY || "").trim()
+            ? "midapi"
+            : "picsum",
     };
     if (url.searchParams.get("probe") === "1") {
       try {
@@ -292,4 +482,5 @@ server.listen(PORT, () => {
   console.log(
     `Adventure proxy (Gemini via Lava) http://127.0.0.1:${PORT}/generate (model ${GEMINI_MODEL})`
   );
+  console.log(`Style prefetch (placeholder or STYLE_IMAGE_RESOLVER_URL): http://127.0.0.1:${PORT}/prefetch-styles`);
 });
