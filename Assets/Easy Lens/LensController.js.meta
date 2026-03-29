@@ -26,7 +26,6 @@
   ExportUid: 00000000-0000-0000-0000-000000000000
   PackagePolicy: CanBeUnpacked
   ScriptInputsHidden:
-    HTTPS: false
     faceEvents: false
     leftPopupText: false
     promptInputText: false
@@ -43,8 +42,7 @@
   Attachments:
     []
   DefaultScriptInputs:
-    - HTTPS: !<RequiredType.internetModule);> 00000000-0000-0000-0000-000000000000
-      faceEvents: !<reference.ScriptComponent> 00000000-0000-0000-0000-000000000000
+    - faceEvents: !<reference.ScriptComponent> 00000000-0000-0000-0000-000000000000
       leftPopupText: !<reference.ScriptComponent> 00000000-0000-0000-0000-000000000000
       rightPopupText: !<reference.ScriptComponent> 00000000-0000-0000-0000-000000000000
       promptInputText: !<reference.Text> 00000000-0000-0000-0000-000000000000
