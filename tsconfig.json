@@ -1,0 +1,40 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "isolatedModules": true,
+    "lib": [
+      "es2021"
+    ],
+    "module": "commonjs",
+    "noEmit": true,
+    "paths": {
+      "*": [
+        "./Assets/*",
+        "./Packages/*",
+        "./Cache/TypeScript/Src/Packages/*"
+      ],
+      "Easy Lens/Lens Components/Face Events_5.9.lsc/*": [
+        "./Assets/Easy Lens/Lens Components/Face Events_5.9.lsc/*",
+        "./Cache/TypeScript/Src/Assets/Easy Lens/Lens Components/Face Events_5.9.lsc/*"
+      ],
+      "Easy Lens/Lens Components/Screen Text_5.12.lsc/*": [
+        "./Assets/Easy Lens/Lens Components/Screen Text_5.12.lsc/*",
+        "./Cache/TypeScript/Src/Assets/Easy Lens/Lens Components/Screen Text_5.12.lsc/*"
+      ]
+    },
+    "skipDefaultLibCheck": true,
+    "target": "es2021",
+    "types": []
+  },
+  "exclude": [
+    "node_modules/typescript/lib/lib.dom.d.ts"
+  ],
+  "include": [
+    "./Cache/TypeScript/lib/LensifyTS/Declarations/**/*.d.ts",
+    "./Assets/**/*.ts",
+    "./Packages/**/*.ts",
+    "./Cache/TypeScript/Src/Packages/**/*.ts",
+    "./Cache/TypeScript/Src/Assets/Easy Lens/Lens Components/Screen Text_5.12.lsc/**/*.ts",
+    "./Cache/TypeScript/Src/Assets/Easy Lens/Lens Components/Face Events_5.9.lsc/**/*.ts"
+  ]
+}

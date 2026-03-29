@@ -1,0 +1,12 @@
+CollapsedEntities:
+  type: stringset
+  value:
+    size: 6
+    values:
+      - Easy Lens/Lens Components
+      - Easy Lens/Lens Components/Face Events_5.9.lsc
+      - Easy Lens/Lens Components/Screen Text_5.12.lsc
+      - Easy Lens/LensController.js
+      - Scene.scene
+      - Untitled JavaScript.js
+  options: 4

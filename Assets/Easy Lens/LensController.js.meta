@@ -1,0 +1,54 @@
+- !<AssetImportMetadata/20fbf926-5d9c-4197-9f55-d048b3a8be87>
+  ImportedAssetIds:
+    JavaScriptAsset: !<reference> 2c38aaef-dfe7-47a4-b572-e27062611c30
+  ImporterName: JavaScriptAssetImporter
+  PrimaryAsset: !<reference> 2c38aaef-dfe7-47a4-b572-e27062611c30
+  PackageType: NotAPackage
+  LegacyPackagePolicy: ~
+  ExtraData:
+    USE_EASY_LENS: ""
+  AssetDataMap:
+    JavaScriptAsset: !<own> 6887b1e6-3721-4b9d-a51c-8f8dadd482b0
+  DependentFiles:
+    []
+  ImporterSettings: !<AssetImporterSettings>
+    {}
+  CompressionSettings: !<own> 00000000-0000-0000-0000-000000000000
+- !<ScriptAssetData/6887b1e6-3721-4b9d-a51c-8f8dadd482b0>
+  SvgIcon: ""
+  SetupScript:
+    code: ""
+  Description: ""
+  VersionMajor: 0
+  VersionMinor: 0
+  VersionPatch: 0
+  ComponentUid: 8ab053db-290b-4e35-9290-6b51d9867855
+  ExportUid: 00000000-0000-0000-0000-000000000000
+  PackagePolicy: CanBeUnpacked
+  ScriptInputsHidden:
+    faceEvents: false
+    internetModule: false
+    leftPopupText: false
+    promptInputText: false
+    rightPopupText: false
+    storyGraphApiUrl: false
+    storyText: false
+  ScriptTypesHidden:
+    {}
+  ReadMe: !<reference> 00000000-0000-0000-0000-000000000000
+  DeclarationFile: !<reference> 00000000-0000-0000-0000-000000000000
+  Tags:
+    []
+  Attachments:
+    []
+  DefaultScriptInputs:
+    - faceEvents: !<reference.ScriptComponent> 00000000-0000-0000-0000-000000000000
+      leftPopupText: !<reference.ScriptComponent> 00000000-0000-0000-0000-000000000000
+      rightPopupText: !<reference.ScriptComponent> 00000000-0000-0000-0000-000000000000
+      promptInputText: !<reference.Text> 00000000-0000-0000-0000-000000000000
+      storyText: !<reference.Text> 00000000-0000-0000-0000-000000000000
+      internetModule: !<reference.InternetModule> 00000000-0000-0000-0000-000000000000
+      storyGraphApiUrl: ""
+  ScriptTypes:
+    -
+      {}

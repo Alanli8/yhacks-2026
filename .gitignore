@@ -1,0 +1,9 @@
+# Story API (secrets + deps)
+server/.env
+server/node_modules/
+
+# OS / editor
+.DS_Store
+
+# Lens Studio transient lock
+*.esproj.*.lock

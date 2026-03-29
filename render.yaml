@@ -1,0 +1,18 @@
+# Deploy: https://dashboard.render.com → New → Blueprint → connect this repo.
+# After deploy, set LAVA_SECRET_KEY in the service → Environment.
+# Your lens URL: https://<service-name>.onrender.com/generate
+services:
+  - type: web
+    name: yhacks-story-api
+    runtime: node
+    region: oregon
+    plan: free
+    rootDir: server
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: LAVA_SECRET_KEY
+        sync: false
